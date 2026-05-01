@@ -425,4 +425,5 @@ the CLI).
 
 ## License
 
-Internal lab tool. Add a license stanza here if/when you publish.
+Released under the [MIT License](LICENSE). See the `LICENSE` file for the
+full text.
