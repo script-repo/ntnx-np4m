@@ -1,0 +1,1288 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NP4M</title>
+  <style>
+    :root {
+      --bg: #f5f6f8;
+      --panel: #ffffff;
+      --border: #e2e5ea;
+      --text: #1f2430;
+      --muted: #6b7280;
+      --accent: #2b5fff;
+      --accent-hover: #1e4ce0;
+      --ok: #2c8a4a;
+      --err: #c53030;
+      --warn: #b46a00;
+      --log-bg: #0f1216;
+      --log-text: #e5e7eb;
+      --log-info: #93c5fd;
+      --log-ok: #86efac;
+      --log-err: #fca5a5;
+      --log-meta: #9ca3af;
+      --shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 1px 3px rgba(15, 23, 42, 0.06);
+      --radius: 8px;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                   "Helvetica Neue", Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 14px;
+      line-height: 1.45;
+    }
+
+    header {
+      background: #0f1216;
+      color: #fff;
+      padding: 16px 28px;
+      border-bottom: 1px solid #1f2430;
+    }
+    header h1 {
+      margin: 0;
+      font-size: 17px;
+      font-weight: 600;
+      letter-spacing: 0.2px;
+    }
+    header .sub {
+      margin-top: 2px;
+      font-size: 12px;
+      color: #9ca3af;
+    }
+
+    main {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 24px 28px 16px;
+      display: grid;
+      gap: 16px;
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 18px 20px;
+    }
+    .card h2 {
+      margin: 0 0 4px 0;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+    }
+    .card .hint {
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 14px;
+    }
+
+    .row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: flex-end;
+    }
+    .field {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      min-width: 180px;
+      flex: 1 1 180px;
+    }
+    .field label {
+      font-size: 12px;
+      color: var(--muted);
+      font-weight: 500;
+    }
+    input[type="text"],
+    input[type="password"],
+    input[type="number"],
+    select,
+    textarea {
+      font: inherit;
+      color: var(--text);
+      background: #fff;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 8px 10px;
+      outline: none;
+      transition: border-color 0.12s, box-shadow 0.12s;
+    }
+    input:focus, select:focus, textarea:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(43, 95, 255, 0.15);
+    }
+    input:disabled, select:disabled, textarea:disabled {
+      background: #f3f4f6;
+      color: #9ca3af;
+      cursor: not-allowed;
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 140px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px;
+      resize: vertical;
+    }
+
+    button {
+      font: inherit;
+      font-weight: 600;
+      color: #fff;
+      background: var(--accent);
+      border: none;
+      border-radius: 6px;
+      padding: 9px 16px;
+      cursor: pointer;
+      transition: background 0.12s, transform 0.04s;
+    }
+    button:hover:not(:disabled) { background: var(--accent-hover); }
+    button:active:not(:disabled) { transform: translateY(1px); }
+    button:disabled {
+      background: #c7cad1;
+      cursor: not-allowed;
+    }
+    button.secondary {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    button.secondary:hover:not(:disabled) {
+      background: #f3f4f6;
+    }
+
+    .status {
+      font-size: 12px;
+      color: var(--muted);
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-left: auto;
+    }
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #c7cad1;
+      display: inline-block;
+    }
+    .status.ok .dot { background: var(--ok); }
+    .status.err .dot { background: var(--err); }
+    .status.busy .dot {
+      background: var(--accent);
+      animation: pulse 1s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.35; }
+    }
+
+    .summary-line {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 8px;
+    }
+    .summary-line strong { color: var(--text); }
+    .summary-line .err-text { color: var(--err); }
+
+    .actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 4px;
+    }
+
+    .log-card {
+      padding: 0;
+      overflow: hidden;
+    }
+    .log-card .log-head {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: #fafbfc;
+    }
+    .log-card h2 {
+      margin: 0;
+    }
+    .log-pane {
+      background: var(--log-bg);
+      color: var(--log-text);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12.5px;
+      line-height: 1.55;
+      padding: 12px 16px;
+      max-height: 360px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .log-pane:empty::before {
+      content: "Logs will appear here.";
+      color: var(--log-meta);
+      font-style: italic;
+    }
+    .log-line { display: block; }
+    .log-line .ts { color: var(--log-meta); margin-right: 8px; }
+    .log-line.info .msg { color: var(--log-info); }
+    .log-line.ok   .msg { color: var(--log-ok); }
+    .log-line.error .msg { color: var(--log-err); }
+    .log-line.system .msg { color: var(--log-meta); font-style: italic; }
+
+    .pill {
+      display: inline-block;
+      padding: 1px 7px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 600;
+      background: #eef2ff;
+      color: #3730a3;
+    }
+    .pill.gray { background: #f3f4f6; color: #4b5563; }
+
+    .auth-toggle {
+      display: flex;
+      gap: 14px;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+    }
+    .auth-toggle .radio {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      color: var(--text);
+      user-select: none;
+    }
+    .auth-toggle .radio input { accent-color: var(--accent); }
+
+    .source-table-wrap {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      max-height: 320px;
+      overflow: auto;
+      margin-top: 10px;
+    }
+    table.source-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12.5px;
+    }
+    table.source-table thead th {
+      position: sticky;
+      top: 0;
+      background: #fafbfc;
+      text-align: left;
+      padding: 8px 10px;
+      font-weight: 600;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }
+    table.source-table tbody td {
+      padding: 6px 10px;
+      border-bottom: 1px solid #f1f3f6;
+      vertical-align: top;
+    }
+    table.source-table tbody tr:hover { background: #fafbfc; }
+    table.source-table tbody tr.is-importable td.col-name { font-weight: 600; }
+    table.source-table tbody tr.is-skip { color: var(--muted); }
+    table.source-table .badge {
+      display: inline-block;
+      padding: 0 6px;
+      border-radius: 999px;
+      font-size: 10.5px;
+      font-weight: 600;
+      background: #f3f4f6;
+      color: #4b5563;
+    }
+    table.source-table .badge.dvs { background: #ede9fe; color: #6d28d9; }
+    table.source-table .badge.vs { background: #ecfeff; color: #155e75; }
+    table.source-table .badge.exists { background: #fef3c7; color: #92400e; }
+    table.source-table .badge.trunk { background: #fee2e2; color: #991b1b; }
+    table.source-table .uplinks {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 11.5px;
+      color: var(--muted);
+    }
+    .source-tools {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+      margin-top: 10px;
+    }
+    .source-tools input[type="text"] {
+      flex: 1 1 240px;
+      max-width: 360px;
+    }
+    .source-tools .meta {
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    @media (max-width: 720px) {
+      main { padding: 16px; }
+      .field { min-width: 140px; }
+    }
+  </style>
+</head>
+
+<body>
+  <header>
+    <h1>NP4M</h1>
+    <div class="sub">Bulk-create unmanaged AHV subnets &mdash; with optional import from another Prism Central, VMware vCenter, or standalone ESXi host</div>
+  </header>
+
+  <main>
+    <!-- Step 1: Connect -->
+    <section class="card" id="card-connect">
+      <div style="display:flex; align-items:center;">
+        <h2>1. Target Prism Central</h2>
+        <span class="status" id="connect-status"><span class="dot"></span><span class="text">Not connected</span></span>
+      </div>
+      <div class="hint">Connect to the Prism Central that manages your AHV cluster(s).</div>
+      <div class="auth-toggle">
+        <label class="radio">
+          <input type="radio" name="pc-auth" value="basic" checked />
+          <span>Username + password</span>
+        </label>
+        <label class="radio">
+          <input type="radio" name="pc-auth" value="token" />
+          <span>API key (Bearer)</span>
+        </label>
+      </div>
+      <div class="row">
+        <div class="field" style="flex: 2 1 220px;">
+          <label for="pc-host">PC IP / FQDN</label>
+          <input type="text" id="pc-host" placeholder="10.0.0.10" autocomplete="off" />
+        </div>
+        <div class="field" style="flex: 0 1 110px; min-width: 100px;">
+          <label for="pc-port">Port</label>
+          <input type="number" id="pc-port" value="9440" min="1" max="65535" />
+        </div>
+        <div class="field auth-basic" style="flex: 1 1 160px;">
+          <label for="pc-user">Username</label>
+          <input type="text" id="pc-user" value="admin" autocomplete="username" />
+        </div>
+        <div class="field auth-basic" style="flex: 1 1 160px;">
+          <label for="pc-pass">Password</label>
+          <input type="password" id="pc-pass" autocomplete="current-password" />
+        </div>
+        <div class="field auth-token" style="flex: 2 1 320px; display:none;">
+          <label for="pc-token">API key</label>
+          <input type="password" id="pc-token" placeholder="Paste PC API key (Bearer prefix optional)" autocomplete="off" />
+        </div>
+        <div class="field" style="flex: 0 0 auto; min-width: 0;">
+          <label>&nbsp;</label>
+          <button id="btn-connect">Connect</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Step 2: Cluster -->
+    <section class="card" id="card-cluster">
+      <h2>2. Target cluster</h2>
+      <div class="hint">Pick the AHV cluster (PE) where the subnets will be created.</div>
+      <div class="row">
+        <div class="field">
+          <label for="cluster-select">Cluster</label>
+          <select id="cluster-select" disabled>
+            <option value="">-- connect first --</option>
+          </select>
+        </div>
+        <div class="field" style="flex: 0 0 auto;">
+          <label>&nbsp;</label>
+          <button class="secondary" id="btn-refresh-clusters" disabled>Refresh</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Step 3: Virtual switch -->
+    <section class="card" id="card-vs">
+      <h2>3. Virtual switch</h2>
+      <div class="hint">Subnets will be attached to this virtual switch on the selected cluster.</div>
+      <div class="row">
+        <div class="field">
+          <label for="vs-select">Virtual switch</label>
+          <select id="vs-select" disabled>
+            <option value="">-- pick a cluster first --</option>
+          </select>
+        </div>
+        <div class="field" style="flex: 0 0 auto;">
+          <label>&nbsp;</label>
+          <button class="secondary" id="btn-refresh-vs" disabled>Refresh</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Step 3.5: Source (optional) -->
+    <section class="card" id="card-source">
+      <div style="display:flex; align-items:center;">
+        <h2>3.5 Import from source (optional)</h2>
+        <span class="status" id="source-status"><span class="dot"></span><span class="text">Not connected</span></span>
+      </div>
+      <div class="hint">
+        Connect to another Prism Central, a VMware vCenter, or a standalone
+        ESXi host; list its existing networks / port-groups; and copy
+        selected entries into the <em>networks to create</em> list below.
+      </div>
+
+      <div class="auth-toggle">
+        <label class="radio">
+          <input type="radio" name="src-kind" value="pc" checked />
+          <span>Nutanix Prism Central</span>
+        </label>
+        <label class="radio">
+          <input type="radio" name="src-kind" value="vcenter" />
+          <span>VMware vCenter / ESXi</span>
+        </label>
+      </div>
+
+      <div class="auth-toggle src-pc-only">
+        <label class="radio">
+          <input type="radio" name="src-pc-auth" value="basic" checked />
+          <span>Username + password</span>
+        </label>
+        <label class="radio">
+          <input type="radio" name="src-pc-auth" value="token" />
+          <span>API key (Bearer)</span>
+        </label>
+      </div>
+
+      <div class="row">
+        <div class="field" style="flex: 2 1 220px;">
+          <label for="src-host">Host / FQDN</label>
+          <input type="text" id="src-host" placeholder="source-pc.example.com or vcenter.example.com" autocomplete="off" />
+        </div>
+        <div class="field" style="flex: 0 1 110px; min-width: 100px;">
+          <label for="src-port">Port</label>
+          <input type="number" id="src-port" value="9440" min="1" max="65535" />
+        </div>
+        <div class="field src-basic" style="flex: 1 1 160px;">
+          <label for="src-user">Username</label>
+          <input type="text" id="src-user" autocomplete="off" />
+        </div>
+        <div class="field src-basic" style="flex: 1 1 160px;">
+          <label for="src-pass">Password</label>
+          <input type="password" id="src-pass" autocomplete="off" />
+        </div>
+        <div class="field src-token" style="flex: 2 1 320px; display:none;">
+          <label for="src-token">API key</label>
+          <input type="password" id="src-token" placeholder="Paste source PC API key" autocomplete="off" />
+        </div>
+        <div class="field" style="flex: 0 0 auto;">
+          <label>&nbsp;</label>
+          <button id="btn-src-connect">Connect &amp; list</button>
+        </div>
+        <div class="field" style="flex: 0 0 auto;">
+          <label>&nbsp;</label>
+          <button class="secondary" id="btn-src-disconnect" disabled>Disconnect</button>
+        </div>
+      </div>
+
+      <div class="source-tools" id="source-tools" style="display:none;">
+        <input type="text" id="src-filter" placeholder="Filter by name, switch, VLAN..." />
+        <button class="secondary" id="btn-src-select-all">Select all visible</button>
+        <button class="secondary" id="btn-src-clear">Clear selection</button>
+        <button id="btn-src-import" disabled>Add selected to networks list</button>
+        <span class="meta" id="src-meta"></span>
+      </div>
+
+      <div class="source-table-wrap" id="src-table-wrap" style="display:none;">
+        <table class="source-table">
+          <thead>
+            <tr>
+              <th style="width: 28px;"></th>
+              <th>Name</th>
+              <th>VLAN</th>
+              <th>Switch</th>
+              <th>Cluster</th>
+              <th>Uplinks / teaming</th>
+              <th>IP / status</th>
+            </tr>
+          </thead>
+          <tbody id="src-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Step 4: Networks -->
+    <section class="card" id="card-networks">
+      <h2>4. Networks to create</h2>
+      <div class="hint">
+        One per line. Format:
+        <code>name,vlan</code>
+        (comma, whitespace, or tab also accepted). Lines starting with
+        <code>#</code> are ignored. Each subnet will be created
+        <span class="pill">unmanaged</span> (no IPAM / DHCP).
+      </div>
+      <textarea id="networks-input" spellcheck="false" placeholder="# example
+network_VLAN_1001,1001
+network_VLAN_1002,1002
+network_VLAN_1003 1003"></textarea>
+      <div class="summary-line" id="parse-summary">Parsed: 0 valid, 0 issue(s).</div>
+    </section>
+
+    <!-- Step 5: Create -->
+    <section class="card" id="card-create">
+      <div class="actions">
+        <button id="btn-create" disabled>Create networks</button>
+        <button class="secondary" id="btn-clear-log">Clear log</button>
+        <span class="status" id="create-status"><span class="dot"></span><span class="text">Idle</span></span>
+      </div>
+    </section>
+
+    <!-- Log -->
+    <section class="card log-card" id="card-log">
+      <div class="log-head">
+        <h2>Log</h2>
+        <span class="pill gray" id="log-count">0 lines</span>
+      </div>
+      <div class="log-pane" id="log-pane"></div>
+    </section>
+  </main>
+
+  <script>
+    const state = {
+      token: null,
+      clusters: [],
+      vs: [],
+      parsed: { networks: [], errors: [] },
+    };
+
+    const $ = (id) => document.getElementById(id);
+
+    function setStatus(elId, kind, text) {
+      const el = $(elId);
+      el.classList.remove("ok", "err", "busy");
+      if (kind) el.classList.add(kind);
+      el.querySelector(".text").textContent = text;
+    }
+
+    function addLog(level, msg) {
+      const pane = $("log-pane");
+      const line = document.createElement("span");
+      line.className = "log-line " + level;
+      const ts = new Date().toLocaleTimeString();
+      const tsSpan = document.createElement("span");
+      tsSpan.className = "ts";
+      tsSpan.textContent = "[" + ts + "]";
+      const msgSpan = document.createElement("span");
+      msgSpan.className = "msg";
+      msgSpan.textContent = " " + msg;
+      line.appendChild(tsSpan);
+      line.appendChild(msgSpan);
+      line.appendChild(document.createElement("br"));
+      pane.appendChild(line);
+      pane.scrollTop = pane.scrollHeight;
+      const count = pane.querySelectorAll(".log-line").length;
+      $("log-count").textContent = count + (count === 1 ? " line" : " lines");
+    }
+
+    async function postJson(url, payload) {
+      const r = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload || {}),
+      });
+      let data = null;
+      try { data = await r.json(); } catch (_) { /* ignore */ }
+      if (!r.ok) {
+        const msg = (data && data.error) || ("HTTP " + r.status);
+        throw new Error(msg);
+      }
+      return data;
+    }
+
+    function getPcAuthMode() {
+      const r = document.querySelector('input[name="pc-auth"]:checked');
+      return r ? r.value : "basic";
+    }
+
+    function applyPcAuthVisibility() {
+      const mode = getPcAuthMode();
+      document.querySelectorAll(".auth-basic").forEach((el) => {
+        el.style.display = mode === "basic" ? "" : "none";
+      });
+      document.querySelectorAll(".auth-token").forEach((el) => {
+        el.style.display = mode === "token" ? "" : "none";
+      });
+    }
+
+    async function doConnect() {
+      const host = $("pc-host").value.trim();
+      const port = parseInt($("pc-port").value, 10) || 9440;
+      const mode = getPcAuthMode();
+      const payload = { host, port, auth_mode: mode };
+      let identityLabel;
+      if (mode === "basic") {
+        const username = $("pc-user").value.trim();
+        const password = $("pc-pass").value;
+        if (!host || !username || !password) {
+          addLog("error", "Host, username, and password are required.");
+          return;
+        }
+        payload.username = username;
+        payload.password = password;
+        identityLabel = `as ${username}`;
+      } else {
+        const apiKey = $("pc-token").value.trim();
+        if (!host || !apiKey) {
+          addLog("error", "Host and API key are required.");
+          return;
+        }
+        payload.api_key = apiKey;
+        identityLabel = "with API key";
+      }
+      $("btn-connect").disabled = true;
+      setStatus("connect-status", "busy", "Connecting...");
+      addLog("system", `Connecting to ${host}:${port} ${identityLabel}...`);
+      try {
+        const res = await postJson("/api/connect", payload);
+        state.token = res.token;
+        const who = (res.auth && res.auth.mode === "token")
+          ? "via API key" : `as ${(res.auth && res.auth.username) || "?"}`;
+        setStatus("connect-status", "ok", `Connected to ${res.host}`);
+        addLog("ok", `Connected to ${res.host} ${who}.`);
+        $("btn-refresh-clusters").disabled = false;
+        await loadClusters();
+      } catch (e) {
+        state.token = null;
+        setStatus("connect-status", "err", "Connect failed");
+        addLog("error", `Connect failed: ${e.message}`);
+      } finally {
+        $("btn-connect").disabled = false;
+      }
+    }
+
+    async function loadClusters() {
+      if (!state.token) return;
+      const sel = $("cluster-select");
+      sel.disabled = true;
+      sel.innerHTML = '<option value="">-- loading --</option>';
+      try {
+        const res = await postJson("/api/clusters", { token: state.token });
+        state.clusters = res.clusters || [];
+        sel.innerHTML = "";
+        if (state.clusters.length === 0) {
+          sel.innerHTML = '<option value="">(no clusters found)</option>';
+          addLog("error", "No PE clusters returned by Prism Central.");
+        } else {
+          const placeholder = document.createElement("option");
+          placeholder.value = "";
+          placeholder.textContent = "-- select a cluster --";
+          sel.appendChild(placeholder);
+          for (const c of state.clusters) {
+            const opt = document.createElement("option");
+            opt.value = c.extId;
+            const hv = (c.hypervisorTypes && c.hypervisorTypes.length)
+              ? c.hypervisorTypes.join(", ") : (c.function || []).join(", ");
+            opt.textContent = `${c.name}  [${hv || "?"}]  -- ${c.extId.slice(0,8)}`;
+            sel.appendChild(opt);
+          }
+          sel.disabled = false;
+          addLog("info", `Loaded ${state.clusters.length} cluster(s).`);
+        }
+      } catch (e) {
+        addLog("error", `Cluster list failed: ${e.message}`);
+        sel.innerHTML = '<option value="">(failed to load)</option>';
+      }
+      updateCreateButton();
+    }
+
+    async function loadVirtualSwitches() {
+      const clusterUuid = $("cluster-select").value;
+      const sel = $("vs-select");
+      sel.disabled = true;
+      sel.innerHTML = '<option value="">-- loading --</option>';
+      $("btn-refresh-vs").disabled = !clusterUuid;
+      if (!state.token || !clusterUuid) {
+        sel.innerHTML = '<option value="">-- pick a cluster first --</option>';
+        return;
+      }
+      try {
+        const res = await postJson("/api/virtual-switches", {
+          token: state.token,
+          cluster_uuid: clusterUuid,
+        });
+        state.vs = res.virtual_switches || [];
+        sel.innerHTML = "";
+        if (state.vs.length === 0) {
+          sel.innerHTML = '<option value="">(no virtual switches on this cluster)</option>';
+          addLog("error", "No virtual switches found for the selected cluster.");
+        } else {
+          const placeholder = document.createElement("option");
+          placeholder.value = "";
+          placeholder.textContent = "-- select a virtual switch --";
+          sel.appendChild(placeholder);
+          for (const v of state.vs) {
+            const opt = document.createElement("option");
+            opt.value = v.extId;
+            const tag = v.isDefault ? " [default]" : "";
+            opt.textContent = `${v.name}${tag}  -- ${v.bondMode || ""}  ${v.extId.slice(0,8)}`;
+            sel.appendChild(opt);
+          }
+          sel.disabled = false;
+          addLog("info", `Loaded ${state.vs.length} virtual switch(es) for cluster.`);
+        }
+      } catch (e) {
+        addLog("error", `Virtual switch list failed: ${e.message}`);
+        sel.innerHTML = '<option value="">(failed to load)</option>';
+      }
+      updateCreateButton();
+    }
+
+    function parseNetworks() {
+      const text = $("networks-input").value;
+      const networks = [];
+      const errors = [];
+      const seen = new Set();
+      const lines = text.split(/\r?\n/);
+      lines.forEach((raw, idx) => {
+        const line = raw.trim();
+        if (!line || line.startsWith("#")) return;
+        const parts = line.split(/[,\s\t]+/).filter(Boolean);
+        if (parts.length === 1) {
+          errors.push(`Line ${idx + 1}: missing VLAN ('${raw}')`);
+          return;
+        }
+        if (parts.length > 2) {
+          errors.push(`Line ${idx + 1}: too many fields ('${raw}')`);
+          return;
+        }
+        const [name, vlanStr] = parts;
+        const vlan = parseInt(vlanStr, 10);
+        if (!Number.isInteger(vlan) || vlan < 0 || vlan > 4094) {
+          errors.push(`Line ${idx + 1}: invalid VLAN '${vlanStr}'`);
+          return;
+        }
+        if (seen.has(name.toLowerCase())) {
+          errors.push(`Line ${idx + 1}: duplicate name '${name}'`);
+          return;
+        }
+        seen.add(name.toLowerCase());
+        networks.push({ name, vlan });
+      });
+      state.parsed = { networks, errors };
+      const summary = $("parse-summary");
+      const errPart = errors.length
+        ? ` <span class="err-text">${errors.length} issue(s)</span>: ${errors.slice(0, 3).join("; ")}${errors.length > 3 ? "..." : ""}`
+        : "";
+      summary.innerHTML = `Parsed: <strong>${networks.length}</strong> valid,${errPart || " 0 issue(s)."}`;
+      updateCreateButton();
+    }
+
+    function updateCreateButton() {
+      const ok =
+        !!state.token &&
+        !!$("cluster-select").value &&
+        !!$("vs-select").value &&
+        state.parsed.networks.length > 0;
+      $("btn-create").disabled = !ok;
+    }
+
+    async function doCreate() {
+      const clusterUuid = $("cluster-select").value;
+      const vsUuid = $("vs-select").value;
+      if (!state.token || !clusterUuid || !vsUuid || state.parsed.networks.length === 0) return;
+      $("btn-create").disabled = true;
+      setStatus("create-status", "busy", "Creating...");
+      addLog("system",
+        `Submitting ${state.parsed.networks.length} subnet(s)` +
+        ` to cluster ${clusterUuid.slice(0, 8)}, VS ${vsUuid.slice(0, 8)}.`);
+
+      let resp;
+      try {
+        resp = await fetch("/api/create", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            token: state.token,
+            cluster_uuid: clusterUuid,
+            vs_uuid: vsUuid,
+            networks: state.parsed.networks,
+          }),
+        });
+      } catch (e) {
+        addLog("error", `Request failed: ${e.message}`);
+        setStatus("create-status", "err", "Failed");
+        $("btn-create").disabled = false;
+        return;
+      }
+      if (!resp.ok) {
+        let errMsg = "HTTP " + resp.status;
+        try {
+          const j = await resp.json();
+          if (j && j.error) errMsg = j.error;
+        } catch (_) {}
+        addLog("error", `Server rejected request: ${errMsg}`);
+        setStatus("create-status", "err", "Failed");
+        $("btn-create").disabled = false;
+        return;
+      }
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      let okCount = 0;
+      let failCount = 0;
+      while (true) {
+        let chunk;
+        try {
+          chunk = await reader.read();
+        } catch (e) {
+          addLog("error", `Stream read error: ${e.message}`);
+          break;
+        }
+        if (chunk.done) break;
+        buf += decoder.decode(chunk.value, { stream: true });
+        let idx;
+        while ((idx = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, idx);
+          buf = buf.slice(idx + 1);
+          if (!line.trim()) continue;
+          let evt;
+          try { evt = JSON.parse(line); } catch (_) { continue; }
+          addLog(evt.level || "info", evt.msg || "");
+          if (evt.level === "ok") okCount++;
+          else if (evt.level === "error") failCount++;
+        }
+      }
+      if (failCount > 0) {
+        setStatus("create-status", "err", `Done with ${failCount} error(s)`);
+      } else {
+        setStatus("create-status", "ok", `Done (${okCount} created)`);
+      }
+      $("btn-create").disabled = false;
+      updateCreateButton();
+    }
+
+    const sourceState = {
+      token: null,
+      kind: null,
+      rows: [],
+      selected: new Set(),
+    };
+
+    function getSrcKind() {
+      const r = document.querySelector('input[name="src-kind"]:checked');
+      return r ? r.value : "pc";
+    }
+    function getSrcPcAuth() {
+      const r = document.querySelector('input[name="src-pc-auth"]:checked');
+      return r ? r.value : "basic";
+    }
+
+    function applySrcVisibility() {
+      const kind = getSrcKind();
+      document.querySelectorAll(".src-pc-only").forEach((el) => {
+        el.style.display = kind === "pc" ? "" : "none";
+      });
+      const isToken = kind === "pc" && getSrcPcAuth() === "token";
+      document.querySelectorAll(".src-basic").forEach((el) => {
+        el.style.display = isToken ? "none" : "";
+      });
+      document.querySelectorAll(".src-token").forEach((el) => {
+        el.style.display = isToken ? "" : "none";
+      });
+      const portInput = $("src-port");
+      if (kind === "pc" && portInput.value === "443") portInput.value = "9440";
+      if (kind === "vcenter" && portInput.value === "9440") portInput.value = "443";
+      if (kind === "vcenter") {
+        document.querySelectorAll(".src-token").forEach((el) => (el.style.display = "none"));
+        document.querySelectorAll(".src-basic").forEach((el) => (el.style.display = ""));
+      }
+    }
+
+    function sanitizeSubnetName(raw) {
+      const trimmed = (raw || "").trim();
+      const replaced = trimmed.replace(/[^A-Za-z0-9_.-]+/g, "_").replace(/^_+|_+$/g, "");
+      return replaced || "imported";
+    }
+
+    function srcRowSkipReason(row, existingTargetNames) {
+      if (!row || row.vlan === null || row.vlan === undefined) {
+        if (row && row.vlanKind === "trunk") return "trunk port-group (no single VLAN)";
+        if (row && row.vlanKind === "pvlan") return "PVLAN spec (manual import only)";
+        return "no usable VLAN";
+      }
+      if (typeof row.vlan !== "number") return `non-integer VLAN (${row.vlan})`;
+      if (row.vlan < 0 || row.vlan > 4094) return `VLAN out of range (${row.vlan})`;
+      const sanitized = sanitizeSubnetName(row.name);
+      if (existingTargetNames && existingTargetNames.has(sanitized.toLowerCase())) {
+        return null;
+      }
+      return null;
+    }
+
+    async function doSourceConnect() {
+      const kind = getSrcKind();
+      const host = $("src-host").value.trim();
+      const port = parseInt($("src-port").value, 10) || (kind === "pc" ? 9440 : 443);
+      if (!host) {
+        addLog("error", "Source host is required.");
+        return;
+      }
+
+      $("btn-src-connect").disabled = true;
+      setStatus("source-status", "busy", "Connecting...");
+      addLog("system", `Source connect: ${kind} ${host}:${port}`);
+
+      let url, payload;
+      if (kind === "pc") {
+        const mode = getSrcPcAuth();
+        url = "/api/source/pc/connect";
+        payload = { host, port, auth_mode: mode };
+        if (mode === "basic") {
+          payload.username = $("src-user").value.trim();
+          payload.password = $("src-pass").value;
+          if (!payload.username || !payload.password) {
+            addLog("error", "Source PC: username and password required.");
+            $("btn-src-connect").disabled = false;
+            setStatus("source-status", "err", "Connect failed");
+            return;
+          }
+        } else {
+          payload.api_key = $("src-token").value.trim();
+          if (!payload.api_key) {
+            addLog("error", "Source PC: API key required.");
+            $("btn-src-connect").disabled = false;
+            setStatus("source-status", "err", "Connect failed");
+            return;
+          }
+        }
+      } else {
+        url = "/api/source/vcenter/connect";
+        payload = {
+          host, port,
+          username: $("src-user").value.trim(),
+          password: $("src-pass").value,
+          ignore_ssl: true,
+        };
+        if (!payload.username || !payload.password) {
+          addLog("error", "vCenter: username and password required.");
+          $("btn-src-connect").disabled = false;
+          setStatus("source-status", "err", "Connect failed");
+          return;
+        }
+      }
+
+      try {
+        const res = await postJson(url, payload);
+        sourceState.token = res.source_token;
+        sourceState.kind = res.kind;
+        const label = res.about && res.about.fullName
+          ? `${res.host} (${res.about.fullName})`
+          : `${res.host}`;
+        setStatus("source-status", "ok", `Connected: ${label}`);
+        addLog("ok", `Source connected: ${label}`);
+        $("btn-src-disconnect").disabled = false;
+        await loadSourceInventory();
+      } catch (e) {
+        sourceState.token = null;
+        sourceState.kind = null;
+        setStatus("source-status", "err", "Connect failed");
+        addLog("error", `Source connect failed: ${e.message}`);
+      } finally {
+        $("btn-src-connect").disabled = false;
+      }
+    }
+
+    function doSourceDisconnect() {
+      sourceState.token = null;
+      sourceState.kind = null;
+      sourceState.rows = [];
+      sourceState.selected.clear();
+      $("btn-src-disconnect").disabled = true;
+      $("btn-src-import").disabled = true;
+      $("source-tools").style.display = "none";
+      $("src-table-wrap").style.display = "none";
+      $("src-tbody").innerHTML = "";
+      setStatus("source-status", null, "Not connected");
+      addLog("system", "Source disconnected.");
+    }
+
+    async function loadSourceInventory() {
+      const kind = sourceState.kind;
+      if (!kind || !sourceState.token) return;
+      const url = kind === "pc"
+        ? "/api/source/pc/inventory"
+        : "/api/source/vcenter/inventory";
+      addLog("info", `Loading source inventory (${kind})...`);
+      try {
+        const res = await postJson(url, { source_token: sourceState.token });
+        sourceState.rows = res.rows || [];
+        sourceState.selected.clear();
+        renderSourceTable();
+        $("source-tools").style.display = "";
+        $("src-table-wrap").style.display = "";
+        addLog("info", `Source inventory: ${sourceState.rows.length} row(s).`);
+      } catch (e) {
+        addLog("error", `Inventory failed: ${e.message}`);
+      }
+    }
+
+    function getTargetExistingNames() {
+      const text = $("networks-input").value;
+      const out = new Set();
+      text.split(/\r?\n/).forEach((line) => {
+        const t = line.trim();
+        if (!t || t.startsWith("#")) return;
+        const parts = t.split(/[,\s\t]+/).filter(Boolean);
+        if (parts.length) out.add(parts[0].toLowerCase());
+      });
+      return out;
+    }
+
+    function renderSourceTable() {
+      const tbody = $("src-tbody");
+      tbody.innerHTML = "";
+      const filterRaw = ($("src-filter").value || "").trim().toLowerCase();
+      const existingInTarget = getTargetExistingNames();
+      let visibleCount = 0;
+      let importable = 0;
+      sourceState.rows.forEach((row, idx) => {
+        const id = String(idx);
+        const haystack = [
+          row.name, row.switchName, row.clusterName,
+          (row.vlan ?? ""), row.switchKind, row.teamingPolicy,
+        ].map((x) => (x === null || x === undefined ? "" : String(x)).toLowerCase()).join(" ");
+        if (filterRaw && !haystack.includes(filterRaw)) return;
+        visibleCount++;
+
+        const skipReason = (() => {
+          if (row.vlan === null || row.vlan === undefined) {
+            if (row.vlanKind === "trunk") return "trunk";
+            if (row.vlanKind === "pvlan") return "pvlan";
+            return "no-vlan";
+          }
+          if (typeof row.vlan !== "number") return "bad-vlan";
+          if (row.vlan < 0 || row.vlan > 4094) return "bad-vlan";
+          return null;
+        })();
+        const sanitized = sanitizeSubnetName(row.name);
+        const dupTarget = existingInTarget.has(sanitized.toLowerCase());
+
+        const tr = document.createElement("tr");
+        tr.dataset.idx = id;
+        tr.classList.add(skipReason ? "is-skip" : "is-importable");
+
+        const tdCheck = document.createElement("td");
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.dataset.idx = id;
+        cb.disabled = !!skipReason;
+        cb.checked = sourceState.selected.has(id);
+        cb.addEventListener("change", () => {
+          if (cb.checked) sourceState.selected.add(id);
+          else sourceState.selected.delete(id);
+          updateImportButton();
+        });
+        tdCheck.appendChild(cb);
+        tr.appendChild(tdCheck);
+
+        const tdName = document.createElement("td");
+        tdName.className = "col-name";
+        tdName.textContent = row.name || "(unnamed)";
+        if (sanitized !== row.name) {
+          const small = document.createElement("div");
+          small.className = "uplinks";
+          small.textContent = `→ ${sanitized}`;
+          tdName.appendChild(small);
+        }
+        tr.appendChild(tdName);
+
+        const tdVlan = document.createElement("td");
+        if (skipReason === "trunk") {
+          const b = document.createElement("span");
+          b.className = "badge trunk";
+          b.textContent = "TRUNK";
+          tdVlan.appendChild(b);
+        } else if (skipReason === "pvlan") {
+          const b = document.createElement("span");
+          b.className = "badge trunk";
+          b.textContent = `PVLAN ${row.vlan ?? ""}`;
+          tdVlan.appendChild(b);
+        } else if (skipReason === "no-vlan") {
+          tdVlan.textContent = "—";
+        } else {
+          tdVlan.textContent = row.vlan;
+        }
+        tr.appendChild(tdVlan);
+
+        const tdSwitch = document.createElement("td");
+        const sb = document.createElement("span");
+        sb.className = "badge " + (row.switchKind === "DVS" ? "dvs" : (row.switchKind === "vSwitch" ? "vs" : ""));
+        sb.textContent = row.switchKind || "?";
+        tdSwitch.appendChild(sb);
+        tdSwitch.appendChild(document.createTextNode(" " + (row.switchName || "")));
+        tr.appendChild(tdSwitch);
+
+        const tdCluster = document.createElement("td");
+        tdCluster.textContent = row.clusterName || "—";
+        tr.appendChild(tdCluster);
+
+        const tdUp = document.createElement("td");
+        tdUp.className = "uplinks";
+        const up = (row.activeUplinks || []).join(", ");
+        const sb2 = (row.standbyUplinks || []).join(", ");
+        const lines = [];
+        if (up) lines.push(`act: ${up}`);
+        if (sb2) lines.push(`sby: ${sb2}`);
+        if (row.teamingPolicy) lines.push(`teaming: ${row.teamingPolicy}`);
+        tdUp.textContent = lines.join("  ·  ") || "—";
+        tr.appendChild(tdUp);
+
+        const tdIp = document.createElement("td");
+        if (row.managed && row.ipPrefix) {
+          tdIp.textContent = `${row.ipPrefix}${row.gateway ? ` gw ${row.gateway}` : ""}`;
+        } else if (dupTarget) {
+          const b = document.createElement("span");
+          b.className = "badge exists";
+          b.textContent = "in target list";
+          tdIp.appendChild(b);
+        } else {
+          tdIp.textContent = "—";
+        }
+        tr.appendChild(tdIp);
+
+        if (!skipReason) importable++;
+        tbody.appendChild(tr);
+      });
+      $("src-meta").textContent =
+        `${visibleCount} visible · ${importable} importable · ${sourceState.selected.size} selected`;
+      updateImportButton();
+    }
+
+    function updateImportButton() {
+      $("btn-src-import").disabled = sourceState.selected.size === 0;
+      $("src-meta").textContent =
+        $("src-meta").textContent.replace(/\d+ selected/, sourceState.selected.size + " selected");
+    }
+
+    function selectAllVisible() {
+      const tbody = $("src-tbody");
+      tbody.querySelectorAll('input[type="checkbox"]').forEach((cb) => {
+        if (!cb.disabled) {
+          cb.checked = true;
+          sourceState.selected.add(cb.dataset.idx);
+        }
+      });
+      updateImportButton();
+    }
+
+    function clearSelection() {
+      sourceState.selected.clear();
+      $("src-tbody").querySelectorAll('input[type="checkbox"]').forEach((cb) => {
+        cb.checked = false;
+      });
+      updateImportButton();
+    }
+
+    function importSelectedToTextarea() {
+      const lines = [];
+      const skipped = [];
+      const seenInBatch = new Set();
+      const existing = getTargetExistingNames();
+      sourceState.selected.forEach((idxStr) => {
+        const idx = parseInt(idxStr, 10);
+        const row = sourceState.rows[idx];
+        if (!row) return;
+        if (row.vlan === null || row.vlan === undefined) {
+          skipped.push(`${row.name || "(unnamed)"}: ${row.vlanKind || "no VLAN"}`);
+          return;
+        }
+        if (typeof row.vlan !== "number" || row.vlan < 0 || row.vlan > 4094) {
+          skipped.push(`${row.name || "(unnamed)"}: bad VLAN ${row.vlan}`);
+          return;
+        }
+        const name = sanitizeSubnetName(row.name);
+        const key = name.toLowerCase();
+        if (existing.has(key) || seenInBatch.has(key)) {
+          skipped.push(`${name}: already in target networks list`);
+          return;
+        }
+        seenInBatch.add(key);
+        lines.push(`${name},${row.vlan}`);
+      });
+      if (lines.length) {
+        const ta = $("networks-input");
+        const cur = ta.value.trimEnd();
+        const sep = cur.length ? "\n" : "";
+        ta.value = cur + sep + lines.join("\n") + "\n";
+        addLog("ok", `Imported ${lines.length} entry(ies) into the networks list.`);
+        parseNetworks();
+      } else {
+        addLog("info", "No importable rows in selection.");
+      }
+      skipped.forEach((s) => addLog("info", `  skipped: ${s}`));
+      sourceState.selected.clear();
+      renderSourceTable();
+    }
+
+    document.addEventListener("DOMContentLoaded", () => {
+      $("btn-connect").addEventListener("click", doConnect);
+      $("pc-pass").addEventListener("keydown", (e) => {
+        if (e.key === "Enter") doConnect();
+      });
+      $("pc-token").addEventListener("keydown", (e) => {
+        if (e.key === "Enter") doConnect();
+      });
+      document.querySelectorAll('input[name="pc-auth"]').forEach((el) => {
+        el.addEventListener("change", applyPcAuthVisibility);
+      });
+      applyPcAuthVisibility();
+      $("btn-refresh-clusters").addEventListener("click", loadClusters);
+      $("cluster-select").addEventListener("change", () => {
+        loadVirtualSwitches();
+        updateCreateButton();
+      });
+      $("btn-refresh-vs").addEventListener("click", loadVirtualSwitches);
+      $("vs-select").addEventListener("change", updateCreateButton);
+      $("networks-input").addEventListener("input", parseNetworks);
+      $("btn-create").addEventListener("click", doCreate);
+      $("btn-clear-log").addEventListener("click", () => {
+        $("log-pane").innerHTML = "";
+        $("log-count").textContent = "0 lines";
+      });
+
+      document.querySelectorAll('input[name="src-kind"]').forEach((el) => {
+        el.addEventListener("change", applySrcVisibility);
+      });
+      document.querySelectorAll('input[name="src-pc-auth"]').forEach((el) => {
+        el.addEventListener("change", applySrcVisibility);
+      });
+      applySrcVisibility();
+      $("btn-src-connect").addEventListener("click", doSourceConnect);
+      $("btn-src-disconnect").addEventListener("click", doSourceDisconnect);
+      $("src-pass").addEventListener("keydown", (e) => {
+        if (e.key === "Enter") doSourceConnect();
+      });
+      $("src-token").addEventListener("keydown", (e) => {
+        if (e.key === "Enter") doSourceConnect();
+      });
+      $("src-filter").addEventListener("input", renderSourceTable);
+      $("btn-src-select-all").addEventListener("click", selectAllVisible);
+      $("btn-src-clear").addEventListener("click", clearSelection);
+      $("btn-src-import").addEventListener("click", importSelectedToTextarea);
+
+      parseNetworks();
+    });
+  </script>
+</body>
+</html>

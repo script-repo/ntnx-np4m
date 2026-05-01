@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg
+*.egg-info/
+.eggs/
+build/
+dist/
+.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Local secrets / config (never commit credentials)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets.json
+credentials.json
+
+# Logs and runtime artifacts
+*.log
+logs/
+flask.log
+
+# OS
+.fuse_hidden*
+.directory
+.Trash-*
+
+# Project local scratch (Ralph dev memory, ad-hoc probes)
+PROMPT.md
+progress.txt
+_*.py
+scratch/

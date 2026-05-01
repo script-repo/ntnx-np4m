@@ -1,0 +1,1096 @@
+"""
+NP4M - bulk AHV subnet provisioning, with optional import from another
+Prism Central, a VMware vCenter, or a standalone VMware ESXi host.
+
+Run:
+    python -m pip install -r requirements.txt
+    python app.py
+    # then open http://127.0.0.1:5000
+
+Target flow:
+    1. Connect to the *target* Prism Central. Auth is either basic
+       (username + password) or an API key (Authorization: Bearer ...).
+    2. Pick a target PE (AHV) cluster.
+    3. Pick a virtual switch (filtered to the chosen cluster).
+    4. Optionally connect to a *source* PC, vCenter, or standalone ESXi
+       host and import its existing subnets / port-groups into the
+       networks list.
+    5. Paste / edit the networks textarea (one per line: `name,vlan`).
+    6. Click "Create networks" -- the log streams in at the bottom.
+
+The server keeps creds in memory keyed by an opaque session token so the
+secret isn't round-tripped on every API call. Restarting the process clears
+all sessions. Source connections live in their own session namespace so
+target and source auth never collide.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import secrets
+import time
+import urllib.parse
+import uuid
+from typing import Any
+
+import requests
+import urllib3
+from flask import (
+    Flask,
+    Response,
+    jsonify,
+    render_template,
+    request,
+    stream_with_context,
+)
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+app = Flask(__name__)
+
+SESSIONS: dict[str, dict[str, Any]] = {}
+SOURCE_SESSIONS: dict[str, dict[str, Any]] = {}
+SESSION_TTL_SECONDS = 3600
+
+
+def _make_pc_session(auth: dict[str, Any]) -> requests.Session:
+    """Build a requests.Session honoring an auth descriptor.
+
+    Accepted shapes:
+        {"mode": "basic", "username": "...", "password": "..."}
+        {"mode": "token", "api_key": "...", "header": "Authorization"}
+    """
+    s = requests.Session()
+    s.verify = False
+    s.headers.update(
+        {"Accept": "application/json", "Content-Type": "application/json"}
+    )
+    mode = (auth or {}).get("mode", "basic")
+    if mode == "basic":
+        s.auth = (auth.get("username") or "", auth.get("password") or "")
+    elif mode == "token":
+        api_key = (auth.get("api_key") or "").strip()
+        if not api_key:
+            raise ValueError("api_key is required for token auth")
+        header_name = auth.get("header") or "Authorization"
+        if header_name.lower() == "authorization":
+            value = api_key if api_key.lower().startswith("bearer ") else f"Bearer {api_key}"
+        else:
+            value = api_key
+        s.headers[header_name] = value
+    else:
+        raise ValueError(f"unsupported auth mode: {mode!r}")
+    return s
+
+
+def _looks_like_auth_error(status: int, text: str) -> bool:
+    """Detect PC auth failures that come back wrapped in 5xx responses."""
+    if status in (401, 403):
+        return True
+    if status >= 500 and text:
+        lower = text.lower()
+        if any(
+            marker in lower
+            for marker in (
+                "response code 403",
+                "response code 401",
+                "unauthorized",
+                "authentication failed",
+            )
+        ):
+            return True
+    return False
+
+
+def _redact_auth(auth: dict[str, Any]) -> dict[str, Any]:
+    """Return an auth descriptor safe to surface to the UI."""
+    if not isinstance(auth, dict):
+        return {"mode": "unknown"}
+    if auth.get("mode") == "basic":
+        return {"mode": "basic", "username": auth.get("username")}
+    if auth.get("mode") == "token":
+        return {"mode": "token"}
+    return {"mode": auth.get("mode") or "unknown"}
+
+
+def _get_session(token: str | None) -> dict[str, Any] | None:
+    if not token:
+        return None
+    sess = SESSIONS.get(token)
+    if not sess:
+        return None
+    if time.time() - sess["created_at"] > SESSION_TTL_SECONDS:
+        SESSIONS.pop(token, None)
+        return None
+    return sess
+
+
+def _get_source_session(token: str | None) -> dict[str, Any] | None:
+    if not token:
+        return None
+    sess = SOURCE_SESSIONS.get(token)
+    if not sess:
+        return None
+    if time.time() - sess["created_at"] > SESSION_TTL_SECONDS:
+        SOURCE_SESSIONS.pop(token, None)
+        return None
+    return sess
+
+
+def _wait_for_task(
+    session: requests.Session,
+    base_url: str,
+    task_ext_id: str,
+    timeout_seconds: int = 120,
+    poll_interval: float = 2.0,
+) -> dict[str, Any]:
+    deadline = time.time() + timeout_seconds
+    last_status = "UNKNOWN"
+    while time.time() < deadline:
+        r = session.get(
+            f"{base_url}/api/prism/v4.0/config/tasks/{task_ext_id}", timeout=30
+        )
+        r.raise_for_status()
+        body = r.json() or {}
+        data = body.get("data") or {}
+        last_status = data.get("status") or last_status
+        if last_status in {"SUCCEEDED", "FAILED", "CANCELED", "CANCELLED"}:
+            return data
+        time.sleep(poll_interval)
+    raise TimeoutError(
+        f"Task {task_ext_id} did not finish within {timeout_seconds}s "
+        f"(last status: {last_status})"
+    )
+
+
+def _extract_task_ext_id(payload: dict[str, Any]) -> str | None:
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if isinstance(data, dict):
+        if isinstance(data.get("extId"), str):
+            return data["extId"]
+        for key in ("taskReference", "task"):
+            ref = data.get(key)
+            if isinstance(ref, dict) and isinstance(ref.get("extId"), str):
+                return ref["extId"]
+    return None
+
+
+def _format_api_error(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return str(payload)[:300]
+    data = payload.get("data") or payload
+    msgs: list[str] = []
+    if isinstance(data, dict):
+        candidates = (
+            data.get("error", {}).get("messageList")
+            if isinstance(data.get("error"), dict)
+            else None
+        )
+        candidates = candidates or data.get("messageList") or data.get("errorMessages")
+        if isinstance(candidates, list):
+            for m in candidates:
+                if isinstance(m, dict):
+                    msg = m.get("message") or m.get("description")
+                    if msg:
+                        msgs.append(str(msg))
+                else:
+                    msgs.append(str(m))
+    return "; ".join(msgs) if msgs else json.dumps(data)[:300]
+
+
+@app.get("/")
+def index():
+    return render_template("index.html")
+
+
+def _auth_from_body(body: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+    """Build an auth descriptor from a connect-request body.
+
+    Accepted body shapes (in priority order):
+        {"auth_mode": "token", "api_key": "..."}
+        {"auth_mode": "basic", "username": "...", "password": "..."}
+        # legacy/back-compat:
+        {"api_key": "..."}                           -> token
+        {"username": "...", "password": "..."}       -> basic
+    Returns (auth_descriptor, error_message). Exactly one is non-None.
+    """
+    body = body or {}
+    mode = (body.get("auth_mode") or "").strip().lower()
+    api_key = (body.get("api_key") or "").strip()
+    username = (body.get("username") or "").strip()
+    password = body.get("password") or ""
+    if not mode:
+        if api_key:
+            mode = "token"
+        elif username or password:
+            mode = "basic"
+    if mode == "token":
+        if not api_key:
+            return None, "api_key is required for token auth"
+        return {"mode": "token", "api_key": api_key}, None
+    if mode == "basic":
+        if not username or not password:
+            return None, "username and password are required for basic auth"
+        return {"mode": "basic", "username": username, "password": password}, None
+    return None, "no credentials provided"
+
+
+@app.post("/api/connect")
+def api_connect():
+    body = request.get_json(force=True, silent=True) or {}
+    host = (body.get("host") or "").strip()
+    port = body.get("port") or 9440
+    if not host:
+        return jsonify(error="host is required"), 400
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        return jsonify(error="port must be an integer"), 400
+    auth, err = _auth_from_body(body)
+    if err:
+        return jsonify(error=err), 400
+    base_url = f"https://{host}:{port}"
+    try:
+        s = _make_pc_session(auth)
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 400
+    try:
+        r = s.get(
+            f"{base_url}/api/clustermgmt/v4.0/config/clusters?$limit=1",
+            timeout=15,
+        )
+    except requests.RequestException as exc:
+        return jsonify(error=f"connection failed: {exc}"), 502
+    if _looks_like_auth_error(r.status_code, r.text):
+        msg = (
+            "invalid API key"
+            if auth["mode"] == "token"
+            else "invalid credentials"
+        )
+        return jsonify(error=msg), 401
+    if r.status_code >= 400:
+        return (
+            jsonify(error=f"PC returned HTTP {r.status_code}: {r.text[:200]}"),
+            502,
+        )
+    token = secrets.token_urlsafe(24)
+    SESSIONS[token] = {
+        "host": host,
+        "port": port,
+        "auth": auth,
+        "base_url": base_url,
+        "created_at": time.time(),
+    }
+    return jsonify(
+        token=token,
+        host=host,
+        port=port,
+        auth=_redact_auth(auth),
+    )
+
+
+@app.post("/api/clusters")
+def api_clusters():
+    body = request.get_json(force=True, silent=True) or {}
+    sess = _get_session(body.get("token"))
+    if not sess:
+        return jsonify(error="not connected"), 401
+    s = _make_pc_session(sess["auth"])
+    try:
+        r = s.get(
+            f"{sess['base_url']}/api/clustermgmt/v4.0/config/clusters?$limit=100",
+            timeout=20,
+        )
+    except requests.RequestException as exc:
+        return jsonify(error=f"request failed: {exc}"), 502
+    if r.status_code >= 400:
+        return jsonify(error=f"HTTP {r.status_code}"), 502
+    data = (r.json() or {}).get("data") or []
+    out: list[dict[str, Any]] = []
+    for c in data:
+        cfg = c.get("config") or {}
+        funcs = cfg.get("clusterFunction") or []
+        if "PRISM_CENTRAL" in funcs:
+            continue
+        out.append(
+            {
+                "extId": c.get("extId"),
+                "name": c.get("name"),
+                "function": funcs,
+                "hypervisorTypes": cfg.get("hypervisorTypes") or [],
+            }
+        )
+    out.sort(key=lambda x: (x.get("name") or "").lower())
+    return jsonify(clusters=out)
+
+
+@app.post("/api/virtual-switches")
+def api_virtual_switches():
+    body = request.get_json(force=True, silent=True) or {}
+    sess = _get_session(body.get("token"))
+    if not sess:
+        return jsonify(error="not connected"), 401
+    cluster_uuid = body.get("cluster_uuid")
+    s = _make_pc_session(sess["auth"])
+    try:
+        r = s.get(
+            f"{sess['base_url']}/api/networking/v4.0/config/virtual-switches?$limit=100",
+            timeout=20,
+        )
+    except requests.RequestException as exc:
+        return jsonify(error=f"request failed: {exc}"), 502
+    if r.status_code >= 400:
+        return jsonify(error=f"HTTP {r.status_code}"), 502
+    data = (r.json() or {}).get("data") or []
+    out: list[dict[str, Any]] = []
+    for vs in data:
+        cluster_uuids = []
+        for cl in vs.get("clusters") or []:
+            if isinstance(cl, dict):
+                ext = cl.get("extId") or cl.get("uuid")
+                if ext:
+                    cluster_uuids.append(ext)
+            elif isinstance(cl, str):
+                cluster_uuids.append(cl)
+        if cluster_uuid and cluster_uuids and cluster_uuid not in cluster_uuids:
+            continue
+        out.append(
+            {
+                "extId": vs.get("extId"),
+                "name": vs.get("name"),
+                "isDefault": bool(vs.get("isDefault")),
+                "bondMode": vs.get("bondMode"),
+                "mtu": vs.get("mtu"),
+                "clusters": cluster_uuids,
+            }
+        )
+    out.sort(
+        key=lambda x: (
+            0 if x.get("isDefault") else 1,
+            (x.get("name") or "").lower(),
+        )
+    )
+    return jsonify(virtual_switches=out)
+
+
+def _list_existing_subnet_names_on_cluster(
+    session: requests.Session, base_url: str, cluster_uuid: str
+) -> tuple[set[str], bool]:
+    """Return (existing_names_lowercased, was_truncated_at_100)."""
+    names: set[str] = set()
+    truncated = False
+    try:
+        r = session.get(
+            f"{base_url}/api/networking/v4.0/config/subnets?$limit=100",
+            timeout=20,
+        )
+    except requests.RequestException:
+        return names, False
+    if r.status_code >= 400:
+        return names, False
+    body = r.json() or {}
+    data = body.get("data") or []
+    meta = body.get("metadata") or {}
+    for sub in data:
+        if sub.get("clusterReference") == cluster_uuid:
+            n = sub.get("name")
+            if n:
+                names.add(n.lower())
+    total = meta.get("totalAvailableResults")
+    if isinstance(total, int) and total > len(data):
+        truncated = True
+    return names, truncated
+
+
+def _create_unmanaged_subnet(
+    session: requests.Session,
+    base_url: str,
+    name: str,
+    vlan: int,
+    cluster_uuid: str,
+    vs_uuid: str | None,
+) -> tuple[int, dict[str, Any]]:
+    body: dict[str, Any] = {
+        "name": name,
+        "description": f"Unmanaged VLAN {vlan} subnet (created via web UI)",
+        "subnetType": "VLAN",
+        "networkId": vlan,
+        "clusterReference": cluster_uuid,
+        "isExternal": False,
+        "isAdvancedNetworking": False,
+    }
+    if vs_uuid:
+        body["virtualSwitchReference"] = vs_uuid
+    headers = {"NTNX-Request-Id": str(uuid.uuid4())}
+    r = session.post(
+        f"{base_url}/api/networking/v4.0/config/subnets",
+        json=body,
+        headers=headers,
+        timeout=60,
+    )
+    try:
+        return r.status_code, r.json()
+    except ValueError:
+        return r.status_code, {"raw": r.text}
+
+
+@app.post("/api/create")
+def api_create():
+    body = request.get_json(force=True, silent=True) or {}
+    sess = _get_session(body.get("token"))
+    if not sess:
+        return jsonify(error="not connected"), 401
+    cluster_uuid = body.get("cluster_uuid")
+    vs_uuid = body.get("vs_uuid") or None
+    networks = body.get("networks") or []
+    if not cluster_uuid:
+        return jsonify(error="cluster_uuid is required"), 400
+    if not isinstance(networks, list) or not networks:
+        return jsonify(error="networks list is required"), 400
+
+    pc_session = _make_pc_session(sess["auth"])
+    base_url = sess["base_url"]
+
+    def emit(level: str, msg: str) -> str:
+        return json.dumps({"level": level, "msg": msg}) + "\n"
+
+    def gen():
+        success = 0
+        fail = 0
+        yield emit(
+            "info",
+            f"Starting creation of {len(networks)} subnet(s) on cluster "
+            f"{cluster_uuid}.",
+        )
+        if vs_uuid:
+            yield emit("info", f"Virtual switch: {vs_uuid}")
+        else:
+            yield emit("info", "Virtual switch: <default>")
+        existing_names, truncated = _list_existing_subnet_names_on_cluster(
+            pc_session, base_url, cluster_uuid
+        )
+        yield emit(
+            "info",
+            f"Cluster currently has {len(existing_names)} subnet(s) "
+            f"{'(first 100 only -- pagination not implemented)' if truncated else ''}".rstrip(),
+        )
+        for net in networks:
+            name = (net or {}).get("name")
+            vlan = (net or {}).get("vlan")
+            if not name or vlan is None:
+                yield emit("error", f"Skipping invalid entry: {net!r}")
+                fail += 1
+                continue
+            try:
+                vlan_i = int(vlan)
+            except (TypeError, ValueError):
+                yield emit("error", f"{name}: invalid VLAN {vlan!r}")
+                fail += 1
+                continue
+            if name.lower() in existing_names:
+                yield emit(
+                    "error",
+                    f"Skipping '{name}': a subnet with that name already "
+                    f"exists on this cluster.",
+                )
+                fail += 1
+                continue
+            yield emit("info", f"Creating '{name}' (VLAN {vlan_i})...")
+            try:
+                status, payload = _create_unmanaged_subnet(
+                    pc_session, base_url, name, vlan_i, cluster_uuid, vs_uuid
+                )
+            except requests.RequestException as exc:
+                yield emit("error", f"  HTTP error: {exc}")
+                fail += 1
+                continue
+            if status not in (200, 201, 202):
+                yield emit(
+                    "error", f"  HTTP {status}: {_format_api_error(payload)}"
+                )
+                fail += 1
+                continue
+            task_id = _extract_task_ext_id(payload)
+            if task_id:
+                yield emit("info", f"  task {task_id} -- waiting...")
+                try:
+                    task = _wait_for_task(
+                        pc_session, base_url, task_id, timeout_seconds=120
+                    )
+                except (TimeoutError, requests.RequestException) as exc:
+                    yield emit("error", f"  task wait failed: {exc}")
+                    fail += 1
+                    continue
+                tstatus = task.get("status")
+                if tstatus == "SUCCEEDED":
+                    yield emit("ok", f"  OK: '{name}' created.")
+                    existing_names.add(name.lower())
+                    success += 1
+                else:
+                    detail = _format_api_error({"data": task}) or tstatus
+                    yield emit("error", f"  FAIL: task {tstatus}: {detail}")
+                    fail += 1
+            else:
+                yield emit(
+                    "ok",
+                    f"  OK: '{name}' (HTTP {status}, no task id returned).",
+                )
+                existing_names.add(name.lower())
+                success += 1
+        yield emit(
+            "info",
+            f"Done. {success} succeeded, {fail} failed (of {len(networks)}).",
+        )
+
+    return Response(
+        stream_with_context(gen()),
+        mimetype="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Source inventory: read-only views of *another* PC, a vCenter, or a
+# standalone ESXi host so the user can import existing networks/port-groups
+# into the create list.
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/source/pc/connect")
+def api_source_pc_connect():
+    body = request.get_json(force=True, silent=True) or {}
+    host = (body.get("host") or "").strip()
+    port = body.get("port") or 9440
+    if not host:
+        return jsonify(error="host is required"), 400
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        return jsonify(error="port must be an integer"), 400
+    auth, err = _auth_from_body(body)
+    if err:
+        return jsonify(error=err), 400
+    base_url = f"https://{host}:{port}"
+    try:
+        s = _make_pc_session(auth)
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 400
+    try:
+        r = s.get(
+            f"{base_url}/api/clustermgmt/v4.0/config/clusters?$limit=1",
+            timeout=15,
+        )
+    except requests.RequestException as exc:
+        return jsonify(error=f"connection failed: {exc}"), 502
+    if _looks_like_auth_error(r.status_code, r.text):
+        msg = (
+            "invalid API key"
+            if auth["mode"] == "token"
+            else "invalid credentials"
+        )
+        return jsonify(error=msg), 401
+    if r.status_code >= 400:
+        return (
+            jsonify(error=f"PC returned HTTP {r.status_code}: {r.text[:200]}"),
+            502,
+        )
+    token = secrets.token_urlsafe(24)
+    SOURCE_SESSIONS[token] = {
+        "kind": "pc",
+        "host": host,
+        "port": port,
+        "auth": auth,
+        "base_url": base_url,
+        "created_at": time.time(),
+    }
+    return jsonify(
+        source_token=token, kind="pc", host=host, port=port,
+        auth=_redact_auth(auth),
+    )
+
+
+def _pc_paginated_get(
+    session: requests.Session, base_url: str, path: str, *, limit: int = 100,
+    max_pages: int = 50,
+) -> list[dict[str, Any]]:
+    """GET an OData v4 list endpoint, paginating until exhausted or capped."""
+    out: list[dict[str, Any]] = []
+    sep = "&" if "?" in path else "?"
+    for page in range(max_pages):
+        url = f"{base_url}{path}{sep}$page={page}&$limit={limit}"
+        r = session.get(url, timeout=30)
+        if r.status_code >= 400:
+            break
+        body = r.json() or {}
+        data = body.get("data") or []
+        out.extend(data)
+        if len(data) < limit:
+            break
+    return out
+
+
+@app.post("/api/source/pc/inventory")
+def api_source_pc_inventory():
+    body = request.get_json(force=True, silent=True) or {}
+    sess = _get_source_session(body.get("source_token"))
+    if not sess or sess.get("kind") != "pc":
+        return jsonify(error="not connected to a source PC"), 401
+    s = _make_pc_session(sess["auth"])
+    base_url = sess["base_url"]
+
+    clusters_raw = _pc_paginated_get(
+        s, base_url, "/api/clustermgmt/v4.0/config/clusters"
+    )
+    cluster_lookup: dict[str, dict[str, Any]] = {}
+    clusters_out: list[dict[str, Any]] = []
+    for c in clusters_raw:
+        cfg = c.get("config") or {}
+        funcs = cfg.get("clusterFunction") or []
+        if "PRISM_CENTRAL" in funcs:
+            continue
+        ext = c.get("extId")
+        if not ext:
+            continue
+        info = {
+            "extId": ext,
+            "name": c.get("name"),
+            "function": funcs,
+            "hypervisorTypes": cfg.get("hypervisorTypes") or [],
+        }
+        cluster_lookup[ext] = info
+        clusters_out.append(info)
+    clusters_out.sort(key=lambda x: (x.get("name") or "").lower())
+
+    vs_raw = _pc_paginated_get(
+        s, base_url, "/api/networking/v4.0/config/virtual-switches"
+    )
+    vs_lookup: dict[str, dict[str, Any]] = {}
+    vs_out: list[dict[str, Any]] = []
+    for vs in vs_raw:
+        ext = vs.get("extId")
+        if not ext:
+            continue
+        cluster_uuids: list[str] = []
+        host_uplink_summary: list[dict[str, Any]] = []
+        for cl in vs.get("clusters") or []:
+            if isinstance(cl, dict):
+                cl_ext = cl.get("extId") or cl.get("uuid")
+                if cl_ext:
+                    cluster_uuids.append(cl_ext)
+                for h in cl.get("hosts") or []:
+                    host_uplink_summary.append(
+                        {
+                            "hostExtId": h.get("extId"),
+                            "internalBridgeName": h.get("internalBridgeName"),
+                            "hostNics": h.get("hostNics") or [],
+                        }
+                    )
+            elif isinstance(cl, str):
+                cluster_uuids.append(cl)
+        info = {
+            "extId": ext,
+            "name": vs.get("name"),
+            "isDefault": bool(vs.get("isDefault")),
+            "bondMode": vs.get("bondMode"),
+            "mtu": vs.get("mtu"),
+            "clusters": cluster_uuids,
+            "clusterNames": [
+                (cluster_lookup.get(u) or {}).get("name") or u[:8]
+                for u in cluster_uuids
+            ],
+            "hostUplinks": host_uplink_summary,
+        }
+        vs_lookup[ext] = info
+        vs_out.append(info)
+    vs_out.sort(
+        key=lambda x: (
+            0 if x.get("isDefault") else 1,
+            (x.get("name") or "").lower(),
+        )
+    )
+
+    subnets_raw = _pc_paginated_get(
+        s, base_url, "/api/networking/v4.0/config/subnets"
+    )
+    subnets_out: list[dict[str, Any]] = []
+    for sub in subnets_raw:
+        cluster_ext = sub.get("clusterReference")
+        vs_ext = sub.get("virtualSwitchReference")
+        cluster_info = cluster_lookup.get(cluster_ext or "")
+        vs_info = vs_lookup.get(vs_ext or "")
+        ip_cfg = sub.get("ipConfig") or []
+        managed = False
+        ip_prefix = None
+        gateway = None
+        if isinstance(ip_cfg, list) and ip_cfg:
+            first = ip_cfg[0] or {}
+            ipv4 = first.get("ipv4") or first.get("ipv6") or {}
+            ip = ipv4.get("ipSubnet") or {}
+            ip_addr = (ip.get("ip") or {}).get("value") if isinstance(ip.get("ip"), dict) else ip.get("ip")
+            prefix_len = ip.get("prefixLength")
+            if ip_addr and prefix_len:
+                ip_prefix = f"{ip_addr}/{prefix_len}"
+            gw_obj = ipv4.get("defaultGatewayIp")
+            if isinstance(gw_obj, dict):
+                gateway = gw_obj.get("value")
+            elif gw_obj:
+                gateway = gw_obj
+            managed = bool(ipv4.get("ipPools") or ipv4.get("dhcpOptions") or ip_prefix)
+        subnets_out.append(
+            {
+                "kind": "subnet",
+                "extId": sub.get("extId"),
+                "name": sub.get("name"),
+                "vlan": sub.get("networkId"),
+                "vlanKind": (
+                    "single" if isinstance(sub.get("networkId"), int) else "none"
+                ),
+                "subnetType": sub.get("subnetType"),
+                "managed": managed,
+                "ipPrefix": ip_prefix,
+                "gateway": gateway,
+                "clusterExtId": cluster_ext,
+                "clusterName": (cluster_info or {}).get("name"),
+                "switchExtId": vs_ext,
+                "switchName": (vs_info or {}).get("name"),
+                "switchKind": "AHV-VS",
+                "activeUplinks": [],
+                "standbyUplinks": [],
+                "teamingPolicy": (vs_info or {}).get("bondMode"),
+                "failback": None,
+            }
+        )
+    subnets_out.sort(
+        key=lambda x: (
+            (x.get("clusterName") or "").lower(),
+            (x.get("name") or "").lower(),
+        )
+    )
+
+    return jsonify(
+        kind="pc",
+        host=sess["host"],
+        clusters=clusters_out,
+        virtual_switches=vs_out,
+        rows=subnets_out,
+    )
+
+
+def _try_import_pyvmomi():
+    try:
+        from pyVim.connect import Disconnect, SmartConnect  # type: ignore
+        from pyVmomi import vim  # type: ignore
+
+        return SmartConnect, Disconnect, vim, None
+    except Exception as exc:  # pragma: no cover - optional dep
+        return None, None, None, exc
+
+
+@app.post("/api/source/vcenter/connect")
+def api_source_vcenter_connect():
+    SmartConnect, Disconnect, vim, imp_err = _try_import_pyvmomi()
+    if imp_err is not None:
+        return (
+            jsonify(
+                error=(
+                    "pyvmomi is not installed in this environment. "
+                    "Run: python -m pip install -r requirements.txt"
+                ),
+                detail=str(imp_err),
+            ),
+            503,
+        )
+    body = request.get_json(force=True, silent=True) or {}
+    host = (body.get("host") or "").strip()
+    port = body.get("port") or 443
+    username = (body.get("username") or "").strip()
+    password = body.get("password") or ""
+    ignore_ssl = bool(body.get("ignore_ssl", True))
+    if not host or not username or not password:
+        return jsonify(error="host, username, and password are required"), 400
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        return jsonify(error="port must be an integer"), 400
+    import ssl as _ssl
+
+    ctx = _ssl.create_default_context()
+    if ignore_ssl:
+        ctx.check_hostname = False
+        ctx.verify_mode = _ssl.CERT_NONE
+    try:
+        si = SmartConnect(
+            host=host, port=port, user=username, pwd=password, sslContext=ctx,
+            connectionPoolTimeout=15,
+        )
+    except Exception as exc:
+        msg = str(exc)
+        lower = msg.lower()
+        if "incorrect user name or password" in lower or "cannot complete login" in lower:
+            return jsonify(error="invalid vCenter credentials"), 401
+        return jsonify(error=f"vCenter connect failed: {msg}"), 502
+    about = None
+    try:
+        about = si.content.about
+    except Exception:
+        pass
+    token = secrets.token_urlsafe(24)
+    SOURCE_SESSIONS[token] = {
+        "kind": "vcenter",
+        "host": host,
+        "port": port,
+        "username": username,
+        "password": password,
+        "ignore_ssl": ignore_ssl,
+        "created_at": time.time(),
+    }
+    try:
+        Disconnect(si)
+    except Exception:
+        pass
+    return jsonify(
+        source_token=token,
+        kind="vcenter",
+        host=host,
+        port=port,
+        username=username,
+        about={
+            "name": getattr(about, "name", None),
+            "version": getattr(about, "version", None),
+            "build": getattr(about, "build", None),
+            "fullName": getattr(about, "fullName", None),
+        },
+    )
+
+
+def _vcenter_decode_vlan(vim, dvpg_default_config) -> tuple[int | None, str]:
+    """Return (vlan_id_or_None, vlanKind) from a DVPG default port config."""
+    try:
+        spec = dvpg_default_config.vlan
+    except Exception:
+        return None, "none"
+    if isinstance(spec, vim.dvs.VmwareDistributedVirtualSwitch.TrunkVlanSpec):
+        return None, "trunk"
+    if isinstance(spec, vim.dvs.VmwareDistributedVirtualSwitch.PvlanSpec):
+        return getattr(spec, "pvlanId", None), "pvlan"
+    if isinstance(spec, vim.dvs.VmwareDistributedVirtualSwitch.VlanIdSpec):
+        vid = getattr(spec, "vlanId", 0) or 0
+        return (vid if vid > 0 else None, "single" if vid > 0 else "none")
+    return None, "unknown"
+
+
+def _vcenter_decode_teaming(vim, default_port_config) -> dict[str, Any]:
+    """Pull teaming/uplink info from a DVPG default port config."""
+    out: dict[str, Any] = {
+        "activeUplinks": [],
+        "standbyUplinks": [],
+        "teamingPolicy": None,
+        "failback": None,
+    }
+    try:
+        teaming = default_port_config.uplinkTeamingPolicy
+    except Exception:
+        teaming = None
+    if not teaming:
+        return out
+    try:
+        policy = teaming.policy
+        if policy is not None:
+            out["teamingPolicy"] = getattr(policy, "value", None)
+    except Exception:
+        pass
+    try:
+        failback = teaming.notifySwitches  # not failback per se, kept for parity
+        out["failback"] = (
+            None
+            if teaming.rollingOrder is None
+            else (not teaming.rollingOrder.value)
+        )
+    except Exception:
+        pass
+    try:
+        upo = teaming.uplinkPortOrder
+        if upo is not None:
+            out["activeUplinks"] = list(getattr(upo, "activeUplinkPort", []) or [])
+            out["standbyUplinks"] = list(
+                getattr(upo, "standbyUplinkPort", []) or []
+            )
+    except Exception:
+        pass
+    return out
+
+
+def _vcenter_collect_objects(content, vim, vimType):
+    """Iterate all managed objects of the given type via container view."""
+    view = content.viewManager.CreateContainerView(
+        content.rootFolder, [vimType], True
+    )
+    try:
+        return list(view.view)
+    finally:
+        try:
+            view.Destroy()
+        except Exception:
+            pass
+
+
+@app.post("/api/source/vcenter/inventory")
+def api_source_vcenter_inventory():
+    SmartConnect, Disconnect, vim, imp_err = _try_import_pyvmomi()
+    if imp_err is not None:
+        return (
+            jsonify(
+                error="pyvmomi is not installed",
+                detail=str(imp_err),
+            ),
+            503,
+        )
+    body = request.get_json(force=True, silent=True) or {}
+    sess = _get_source_session(body.get("source_token"))
+    if not sess or sess.get("kind") != "vcenter":
+        return jsonify(error="not connected to a source vCenter"), 401
+    import ssl as _ssl
+
+    ctx = _ssl.create_default_context()
+    if sess.get("ignore_ssl", True):
+        ctx.check_hostname = False
+        ctx.verify_mode = _ssl.CERT_NONE
+    try:
+        si = SmartConnect(
+            host=sess["host"], port=sess["port"], user=sess["username"],
+            pwd=sess["password"], sslContext=ctx, connectionPoolTimeout=15,
+        )
+    except Exception as exc:
+        return jsonify(error=f"vCenter reconnect failed: {exc}"), 502
+    try:
+        content = si.content
+
+        rows: list[dict[str, Any]] = []
+
+        dvss = _vcenter_collect_objects(content, vim, vim.DistributedVirtualSwitch)
+        for dvs in dvss:
+            switch_name = getattr(dvs, "name", None)
+            try:
+                pgs = list(dvs.portgroup or [])
+            except Exception:
+                pgs = []
+            for pg in pgs:
+                try:
+                    if getattr(pg.config, "uplink", False):
+                        continue
+                except Exception:
+                    pass
+                pg_name = getattr(pg, "name", None) or getattr(pg.config, "name", None)
+                vlan_id, vlan_kind = _vcenter_decode_vlan(
+                    vim, pg.config.defaultPortConfig
+                )
+                teaming = _vcenter_decode_teaming(
+                    vim, pg.config.defaultPortConfig
+                )
+                rows.append(
+                    {
+                        "kind": "portgroup",
+                        "extId": getattr(pg, "key", None),
+                        "name": pg_name,
+                        "vlan": vlan_id,
+                        "vlanKind": vlan_kind,
+                        "subnetType": "VLAN" if vlan_kind == "single" else None,
+                        "managed": False,
+                        "ipPrefix": None,
+                        "gateway": None,
+                        "clusterExtId": None,
+                        "clusterName": None,
+                        "switchExtId": getattr(dvs, "uuid", None),
+                        "switchName": switch_name,
+                        "switchKind": "DVS",
+                        **teaming,
+                    }
+                )
+
+        hosts = _vcenter_collect_objects(content, vim, vim.HostSystem)
+        seen_std_pg = set()
+        for host in hosts:
+            try:
+                ns = host.config.network
+            except Exception:
+                continue
+            for pg in getattr(ns, "portgroup", []) or []:
+                spec = getattr(pg, "spec", None)
+                if not spec:
+                    continue
+                key = (getattr(spec, "name", None), getattr(spec, "vswitchName", None))
+                if key in seen_std_pg:
+                    continue
+                seen_std_pg.add(key)
+                vlan_id_raw = getattr(spec, "vlanId", 0) or 0
+                if vlan_id_raw == 4095:
+                    vlan_id, vlan_kind = None, "trunk"
+                elif vlan_id_raw == 0:
+                    vlan_id, vlan_kind = None, "none"
+                else:
+                    vlan_id, vlan_kind = vlan_id_raw, "single"
+                teaming_policy = None
+                active_uplinks: list[str] = []
+                standby_uplinks: list[str] = []
+                failback = None
+                try:
+                    nic_pol = pg.computedPolicy.nicTeaming
+                    teaming_policy = getattr(nic_pol.policy, "value", None)
+                    failback = getattr(nic_pol, "rollingOrder", None)
+                    if failback is not None:
+                        failback = not failback
+                    no = nic_pol.nicOrder
+                    if no:
+                        active_uplinks = list(getattr(no, "activeNic", []) or [])
+                        standby_uplinks = list(getattr(no, "standbyNic", []) or [])
+                except Exception:
+                    pass
+                rows.append(
+                    {
+                        "kind": "portgroup",
+                        "extId": f"std:{getattr(spec, 'vswitchName', '')}:{getattr(spec, 'name', '')}",
+                        "name": getattr(spec, "name", None),
+                        "vlan": vlan_id,
+                        "vlanKind": vlan_kind,
+                        "subnetType": "VLAN" if vlan_kind == "single" else None,
+                        "managed": False,
+                        "ipPrefix": None,
+                        "gateway": None,
+                        "clusterExtId": None,
+                        "clusterName": None,
+                        "switchExtId": None,
+                        "switchName": getattr(spec, "vswitchName", None),
+                        "switchKind": "vSwitch",
+                        "activeUplinks": active_uplinks,
+                        "standbyUplinks": standby_uplinks,
+                        "teamingPolicy": teaming_policy,
+                        "failback": failback,
+                    }
+                )
+
+        rows.sort(
+            key=lambda x: (
+                (x.get("switchName") or "").lower(),
+                (x.get("name") or "").lower(),
+            )
+        )
+        return jsonify(
+            kind="vcenter",
+            host=sess["host"],
+            rows=rows,
+        )
+    except Exception as exc:
+        return jsonify(error=f"vCenter inventory failed: {exc}"), 502
+    finally:
+        try:
+            Disconnect(si)
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    host = os.environ.get("WEB_HOST", "127.0.0.1")
+    port = int(os.environ.get("WEB_PORT", "5000"))
+    debug = os.environ.get("WEB_DEBUG") == "1"
+    app.run(host=host, port=port, debug=debug, threaded=True)
