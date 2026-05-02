@@ -105,8 +105,15 @@ def create_unmanaged_vlan_subnet(
     name: str,
     vlan_id: int,
     cluster_uuid: str,
+    advanced: bool = True,
 ) -> tuple[int, dict[str, Any]]:
-    """POST a single unmanaged VLAN subnet. Returns (status_code, json_body)."""
+    """POST a single unmanaged VLAN subnet. Returns (status_code, json_body).
+
+    `advanced` toggles the `isAdvancedNetworking` body field. The default
+    (True) future-proofs the subnet for Flow / VPC participation. Callers
+    should fall back to `advanced=False` if the cluster rejects the advanced
+    flag (e.g. Flow Network Security is not licensed or enabled).
+    """
     body = {
         "name": name,
         "description": f"Unmanaged VLAN {vlan_id} subnet (created via v4 API)",
@@ -114,7 +121,7 @@ def create_unmanaged_vlan_subnet(
         "networkId": vlan_id,
         "clusterReference": cluster_uuid,
         "isExternal": False,
-        "isAdvancedNetworking": False,
+        "isAdvancedNetworking": bool(advanced),
     }
     headers = {
         "NTNX-Request-Id": str(uuid.uuid4()),
@@ -258,53 +265,86 @@ def main() -> int:
 
     successes: list[str] = []
     failures: list[tuple[str, str]] = []
+    fallbacks: list[str] = []
 
-    for vlan_id in range(args.vlan_start, args.vlan_end + 1):
-        name = f"{args.name_prefix}{vlan_id}"
-        print(f"\nCreating subnet '{name}' (VLAN {vlan_id})...")
+    def attempt(name: str, vlan_id: int, advanced: bool) -> tuple[bool, str | None]:
+        """One create attempt. Returns (ok, detail).
+
+        On success, `detail` is None or a short human note (e.g. when no
+        task id was returned). On failure, `detail` is a short reason string
+        suitable for logging.
+        """
         try:
             status, payload = create_unmanaged_vlan_subnet(
-                session, base_url, name, vlan_id, cluster_uuid
+                session, base_url, name, vlan_id, cluster_uuid,
+                advanced=advanced,
             )
         except requests.RequestException as exc:
-            print(f"  ! HTTP error: {exc}")
-            failures.append((name, str(exc)))
-            continue
+            return False, f"HTTP error: {exc}"
 
         if status not in (200, 201, 202):
             err = payload.get("data") or payload
-            print(f"  ! HTTP {status}: {json.dumps(err)[:500]}")
-            failures.append((name, f"HTTP {status}"))
-            continue
+            return False, f"HTTP {status}: {json.dumps(err)[:500]}"
 
         task_id = extract_task_ext_id(payload)
-        if task_id and not args.no_wait:
-            print(f"  -> task {task_id}, waiting...")
-            try:
-                task = wait_for_task(
-                    session, base_url, task_id, timeout_seconds=args.task_timeout
-                )
-            except (TimeoutError, requests.RequestException) as exc:
-                print(f"  ! task wait failed: {exc}")
-                failures.append((name, str(exc)))
-                continue
-            task_status = task.get("status")
-            if task_status == "SUCCEEDED":
-                print(f"  OK: {name} created (task {task_id} SUCCEEDED).")
-                successes.append(name)
-            else:
-                err_detail = task.get("errorMessages") or task.get("status")
-                print(f"  ! task {task_status}: {err_detail}")
-                failures.append((name, f"task {task_status}"))
-        else:
+        if not task_id or args.no_wait:
             note = "task polling skipped" if args.no_wait else "no task id returned"
-            print(f"  OK: HTTP {status} ({note}).")
+            return True, f"HTTP {status}, {note}"
+
+        print(f"  -> task {task_id}, waiting...")
+        try:
+            task = wait_for_task(
+                session, base_url, task_id, timeout_seconds=args.task_timeout
+            )
+        except (TimeoutError, requests.RequestException) as exc:
+            return False, f"task wait failed: {exc}"
+        task_status = task.get("status")
+        if task_status == "SUCCEEDED":
+            return True, None
+        err_detail = task.get("errorMessages") or task_status
+        return False, f"task {task_status}: {err_detail}"
+
+    for vlan_id in range(args.vlan_start, args.vlan_end + 1):
+        name = f"{args.name_prefix}{vlan_id}"
+        print(
+            f"\nCreating subnet '{name}' (VLAN {vlan_id}) "
+            f"with isAdvancedNetworking=true..."
+        )
+        ok, detail = attempt(name, vlan_id, advanced=True)
+        flag_used = "isAdvancedNetworking=true"
+
+        if not ok:
+            print(
+                f"  ! '{name}' could not be created with "
+                f"isAdvancedNetworking=true."
+            )
+            print(f"      reason: {detail}")
+            print(
+                f"  -> retrying '{name}' with isAdvancedNetworking=false..."
+            )
+            ok, detail = attempt(name, vlan_id, advanced=False)
+            flag_used = "isAdvancedNetworking=false"
+            if ok:
+                fallbacks.append(name)
+
+        if ok:
+            note = f" ({detail})" if detail else ""
+            print(f"  OK: {name} created [{flag_used}]{note}.")
             successes.append(name)
+        else:
+            print(f"  ! FAIL: {name} [{flag_used}]: {detail}")
+            failures.append((name, f"{flag_used}: {detail}"))
 
     print("\n=== Summary ===")
     print(f"  Created/accepted : {len(successes)}")
     for n in successes:
-        print(f"    + {n}")
+        marker = " (fallback)" if n in fallbacks else ""
+        print(f"    + {n}{marker}")
+    if fallbacks:
+        print(
+            f"  Fell back to isAdvancedNetworking=false: "
+            f"{len(fallbacks)} subnet(s)."
+        )
     if failures:
         print(f"  Failed           : {len(failures)}")
         for n, why in failures:

@@ -410,7 +410,16 @@ def _create_unmanaged_subnet(
     vlan: int,
     cluster_uuid: str,
     vs_uuid: str | None,
+    advanced: bool = True,
 ) -> tuple[int, dict[str, Any]]:
+    """POST a single unmanaged VLAN subnet.
+
+    `advanced` controls the `isAdvancedNetworking` body field. The default is
+    True so the resulting subnet can later participate in Flow / VPC features
+    without a migration. Callers should fall back to `advanced=False` if the
+    target cluster rejects the advanced flag (e.g. FNS / Flow Networking is
+    not licensed or not enabled).
+    """
     body: dict[str, Any] = {
         "name": name,
         "description": f"Unmanaged VLAN {vlan} subnet (created via web UI)",
@@ -418,7 +427,7 @@ def _create_unmanaged_subnet(
         "networkId": vlan,
         "clusterReference": cluster_uuid,
         "isExternal": False,
-        "isAdvancedNetworking": False,
+        "isAdvancedNetworking": bool(advanced),
     }
     if vs_uuid:
         body["virtualSwitchReference"] = vs_uuid
@@ -458,6 +467,7 @@ def api_create():
     def gen():
         success = 0
         fail = 0
+        fallback_count = 0
         yield emit(
             "info",
             f"Starting creation of {len(networks)} subnet(s) on cluster "
@@ -475,6 +485,41 @@ def api_create():
             f"Cluster currently has {len(existing_names)} subnet(s) "
             f"{'(first 100 only -- pagination not implemented)' if truncated else ''}".rstrip(),
         )
+
+        def attempt(net_name: str, net_vlan: int, adv: bool):
+            """Single create attempt.
+
+            Yields ndjson log lines that should be streamed live (e.g. the
+            "task waiting..." marker before the long blocking poll).
+            Returns (ok: bool, detail: str | None) where `detail` is a
+            human-readable failure reason on failure or an optional note on
+            success.
+            """
+            try:
+                status, payload = _create_unmanaged_subnet(
+                    pc_session, base_url, net_name, net_vlan,
+                    cluster_uuid, vs_uuid, advanced=adv,
+                )
+            except requests.RequestException as exc:
+                return False, f"HTTP error: {exc}"
+            if status not in (200, 201, 202):
+                return False, f"HTTP {status}: {_format_api_error(payload)}"
+            task_id = _extract_task_ext_id(payload)
+            if not task_id:
+                return True, f"HTTP {status}, no task id returned"
+            yield emit("info", f"  task {task_id} -- waiting...")
+            try:
+                task = _wait_for_task(
+                    pc_session, base_url, task_id, timeout_seconds=120
+                )
+            except (TimeoutError, requests.RequestException) as exc:
+                return False, f"task wait failed: {exc}"
+            tstatus = task.get("status")
+            if tstatus == "SUCCEEDED":
+                return True, None
+            detail = _format_api_error({"data": task}) or tstatus
+            return False, f"task {tstatus}: {detail}"
+
         for net in networks:
             name = (net or {}).get("name")
             vlan = (net or {}).get("vlan")
@@ -496,51 +541,56 @@ def api_create():
                 )
                 fail += 1
                 continue
-            yield emit("info", f"Creating '{name}' (VLAN {vlan_i})...")
-            try:
-                status, payload = _create_unmanaged_subnet(
-                    pc_session, base_url, name, vlan_i, cluster_uuid, vs_uuid
-                )
-            except requests.RequestException as exc:
-                yield emit("error", f"  HTTP error: {exc}")
-                fail += 1
-                continue
-            if status not in (200, 201, 202):
+
+            yield emit(
+                "info",
+                f"Creating '{name}' (VLAN {vlan_i}) "
+                f"with isAdvancedNetworking=true...",
+            )
+            ok, detail = yield from attempt(name, vlan_i, adv=True)
+            flag_used = "isAdvancedNetworking=true"
+
+            if not ok:
                 yield emit(
-                    "error", f"  HTTP {status}: {_format_api_error(payload)}"
+                    "warn",
+                    f"  '{name}' could not be created with "
+                    f"isAdvancedNetworking=true.",
                 )
-                fail += 1
-                continue
-            task_id = _extract_task_ext_id(payload)
-            if task_id:
-                yield emit("info", f"  task {task_id} -- waiting...")
-                try:
-                    task = _wait_for_task(
-                        pc_session, base_url, task_id, timeout_seconds=120
-                    )
-                except (TimeoutError, requests.RequestException) as exc:
-                    yield emit("error", f"  task wait failed: {exc}")
-                    fail += 1
-                    continue
-                tstatus = task.get("status")
-                if tstatus == "SUCCEEDED":
-                    yield emit("ok", f"  OK: '{name}' created.")
-                    existing_names.add(name.lower())
-                    success += 1
-                else:
-                    detail = _format_api_error({"data": task}) or tstatus
-                    yield emit("error", f"  FAIL: task {tstatus}: {detail}")
-                    fail += 1
-            else:
+                yield emit("warn", f"    reason: {detail}")
+                yield emit(
+                    "warn",
+                    f"  Retrying '{name}' with isAdvancedNetworking=false...",
+                )
+                ok, detail = yield from attempt(name, vlan_i, adv=False)
+                flag_used = "isAdvancedNetworking=false"
+                if ok:
+                    fallback_count += 1
+
+            if ok:
+                note = f" ({detail})" if detail else ""
                 yield emit(
                     "ok",
-                    f"  OK: '{name}' (HTTP {status}, no task id returned).",
+                    f"  OK: '{name}' created [{flag_used}]{note}.",
                 )
                 existing_names.add(name.lower())
                 success += 1
+            else:
+                yield emit(
+                    "error",
+                    f"  FAIL: '{name}' could not be created "
+                    f"[{flag_used}]: {detail}",
+                )
+                fail += 1
+
+        summary_extra = (
+            f" ({fallback_count} via isAdvancedNetworking=false fallback)"
+            if fallback_count
+            else ""
+        )
         yield emit(
             "info",
-            f"Done. {success} succeeded, {fail} failed (of {len(networks)}).",
+            f"Done. {success} succeeded{summary_extra}, "
+            f"{fail} failed (of {len(networks)}).",
         )
 
     return Response(

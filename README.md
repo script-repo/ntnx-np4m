@@ -253,6 +253,14 @@ the textarea live-validates and tells you how many entries are accepted.
 Each subnet will be created **unmanaged** (no IPAM, no DHCP — pure VLAN-
 backed L2).
 
+NP4M sends `"isAdvancedNetworking": true` by default so the resulting
+subnets can later participate in Flow Network Security / VPC features
+without a one-shot migration. If the target cluster rejects the advanced
+flag (e.g. Flow Network Security is not licensed or enabled), NP4M
+**logs the specific PC error in amber, then transparently retries the
+same subnet with `"isAdvancedNetworking": false`**. The streaming summary
+counts these as successes and notes how many fell back.
+
 Constraints:
 
 - VLAN must be an integer in `0..4094`.
@@ -272,10 +280,23 @@ Click it and the log streams in real-time:
 [10:00:01] Starting creation of 3 subnet(s) on cluster ...
 [10:00:01] Virtual switch: ...
 [10:00:01] Cluster currently has 13 subnet(s)
-[10:00:01] Creating 'network_VLAN_2099' (VLAN 2099)...
+[10:00:01] Creating 'network_VLAN_2099' (VLAN 2099) with isAdvancedNetworking=true...
 [10:00:01]   task ZXJnb24=:09fd... -- waiting...
-[10:00:04]   OK: 'network_VLAN_2099' created.
+[10:00:04]   OK: 'network_VLAN_2099' created [isAdvancedNetworking=true].
 [10:00:04] Done. 1 succeeded, 0 failed (of 1).
+```
+
+If the target cluster doesn't support / license the advanced flag, the
+log shows the fallback path explicitly:
+
+```
+[10:00:05] Creating 'network_VLAN_2100' (VLAN 2100) with isAdvancedNetworking=true...
+[10:00:05]   'network_VLAN_2100' could not be created with isAdvancedNetworking=true.
+[10:00:05]     reason: HTTP 400: Advanced networking is not enabled on this cluster
+[10:00:05]   Retrying 'network_VLAN_2100' with isAdvancedNetworking=false...
+[10:00:05]   task ZXJnb24=:0a01... -- waiting...
+[10:00:08]   OK: 'network_VLAN_2100' created [isAdvancedNetworking=false].
+[10:00:08] Done. 1 succeeded (1 via isAdvancedNetworking=false fallback), 0 failed (of 1).
 ```
 
 Each create is async on PC; NP4M polls the v4 task endpoint
