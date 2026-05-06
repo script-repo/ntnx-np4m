@@ -37,6 +37,10 @@ already exists somewhere else.
   subnet POST is followed by task polling until `SUCCEEDED` / `FAILED`.
 - Pre-flight **duplicate-name check** against the target cluster (AHV doesn't
   enforce unique subnet names, so NP4M does it for you).
+- Live **"Existing networks on target cluster"** panel that lists every
+  subnet currently on the selected cluster (name, VLAN, type, virtual
+  switch, advanced flag, IP). Auto-refreshes when you change clusters and
+  again after every Create run, so you can verify what actually landed.
 
 A standalone CLI helper (`create_subnets.py`) is included for scripted /
 non-UI provisioning.
@@ -142,7 +146,7 @@ python app.py
 
 ## Walkthrough
 
-The UI is a single page with five (or six, if you import) numbered cards.
+The UI is a single page with six (or seven, if you import) numbered cards.
 Each card unlocks the next one once it's set.
 
 ### 1. Target Prism Central
@@ -158,9 +162,10 @@ This is the PC that manages the AHV cluster you want subnets created on.
   `Authorization: Bearer <key>`. The "Bearer " prefix is added
   automatically if you don't include it.
 
-Fill in the host, leave the port at `9440`, fill the appropriate credential
-fields, and click **Connect**. The status pill turns green and the log shows
-the connection event.
+Fill in the host, fill the appropriate credential fields, and click
+**Connect**. NP4M always uses port `9440` for the target Prism Central
+(the field is intentionally not exposed in the UI). The status pill turns
+green and the log shows the connection event.
 
 > **Generating an API key on PC** (recommended for automation):
 > Settings → Identity Providers → Local Directory → pick a service account →
@@ -173,7 +178,9 @@ Once connected, the cluster dropdown auto-populates with every PE cluster
 registered to that PC (the PC itself is filtered out). Clusters are labeled
 with their hypervisor types so you can confirm `[AHV]`. Pick the target.
 
-Click **Refresh** if the cluster list was modified since you connected.
+To refresh the cluster list (for example, after registering a new PE),
+re-click **Connect** in step 1 — it re-runs the cluster query as part of
+the reconnect.
 
 ### 3. Virtual switch
 
@@ -236,7 +243,34 @@ Click **Disconnect** when you're done with the source. Source sessions are
 isolated from your target PC session, so you can connect to either side
 independently.
 
-### 4. Networks to create
+### 4. Existing networks on target cluster
+
+A read-only panel that shows every subnet currently on the selected
+cluster, sorted by VLAN ascending then name. Columns:
+
+| Column           | Notes                                                     |
+|------------------|-----------------------------------------------------------|
+| Name             | Subnet name as PC sees it.                                |
+| VLAN             | `networkId` from the v4 subnet object (or `—` for overlays). |
+| Type             | `VLAN` / `OVERLAY` / `EXTERNAL` etc. — straight from `subnetType`. |
+| Virtual switch   | Resolved by joining `virtualSwitchReference` against the VS list — falls back to a short extId if PC doesn't return a name. |
+| Advanced         | `yes` / `no` from `isAdvancedNetworking`.                 |
+| IP / description | First entry's `ipv4` block formatted as `<ip>/<prefix> gw <gateway>` if the subnet is managed; otherwise the subnet's description, or `—`. |
+
+The panel auto-refreshes:
+
+- when you pick a cluster in step 2 (so you can see what's already there
+  before typing into the create list, and avoid duplicates by sight); and
+- at the tail of every **Create networks** run (so successful creates pop
+  in immediately and you can verify them without leaving the page).
+
+There is also a **Refresh** button for ad-hoc reloads. The endpoint
+underneath is `POST /api/target-subnets`. Like the rest of NP4M, it caps
+at 100 results and surfaces a `(truncated at 100)` tail in the panel
+header if the cluster has more — extend `_pc_paginated_get` callers in
+`app.py` if you need full pagination.
+
+### 5. Networks to create
 
 The textarea accepts one network per line. Format options (mix and match):
 
@@ -269,7 +303,7 @@ Constraints:
   pre-flight `GET /subnets`; conflicts are skipped at create time with a
   log line.
 
-### 5. Create networks
+### 6. Create networks
 
 The button enables only when all of {connected, target cluster, virtual
 switch, ≥1 valid network} are present.
@@ -343,6 +377,7 @@ All endpoints use JSON.
 | POST   | `/api/connect`                      | Connect to target PC, returns `{token}`    |
 | POST   | `/api/clusters`                     | List clusters reachable via target token   |
 | POST   | `/api/virtual-switches`             | List VS, optionally filtered by cluster    |
+| POST   | `/api/target-subnets`               | List existing subnets on a target cluster (verification panel) |
 | POST   | `/api/create`                       | Bulk create (NDJSON streaming response)    |
 | POST   | `/api/source/pc/connect`            | Connect to a *source* PC                   |
 | POST   | `/api/source/pc/inventory`          | Source PC inventory rows                   |

@@ -374,6 +374,104 @@ def api_virtual_switches():
     return jsonify(virtual_switches=out)
 
 
+@app.post("/api/target-subnets")
+def api_target_subnets():
+    """List all subnets currently on the target cluster.
+
+    Used by the UI to verify that subnets created via /api/create actually
+    landed on the cluster. Returns enough fields (name, VLAN, type,
+    virtual switch, advanced flag, IP summary) for a side-by-side table
+    against the user's intended networks list.
+    """
+    body = request.get_json(force=True, silent=True) or {}
+    sess = _get_session(body.get("token"))
+    if not sess:
+        return jsonify(error="not connected"), 401
+    cluster_uuid = body.get("cluster_uuid")
+    if not cluster_uuid:
+        return jsonify(error="cluster_uuid is required"), 400
+
+    s = _make_pc_session(sess["auth"])
+    base_url = sess["base_url"]
+
+    vs_names: dict[str, str] = {}
+    try:
+        rv = s.get(
+            f"{base_url}/api/networking/v4.0/config/virtual-switches?$limit=100",
+            timeout=20,
+        )
+        if rv.status_code < 400:
+            for vs in (rv.json() or {}).get("data") or []:
+                ext = vs.get("extId")
+                name = vs.get("name")
+                if ext and name:
+                    vs_names[ext] = name
+    except requests.RequestException:
+        pass
+
+    try:
+        r = s.get(
+            f"{base_url}/api/networking/v4.0/config/subnets?$limit=100",
+            timeout=20,
+        )
+    except requests.RequestException as exc:
+        return jsonify(error=f"request failed: {exc}"), 502
+    if r.status_code >= 400:
+        return jsonify(error=f"HTTP {r.status_code}: {r.text[:200]}"), 502
+
+    payload = r.json() or {}
+    data = payload.get("data") or []
+    meta = payload.get("metadata") or {}
+
+    out: list[dict[str, Any]] = []
+    for sub in data:
+        if sub.get("clusterReference") != cluster_uuid:
+            continue
+        vs_ref = sub.get("virtualSwitchReference")
+
+        ip_summary: str | None = None
+        ip_cfg = sub.get("ipConfig") or []
+        if isinstance(ip_cfg, list) and ip_cfg:
+            ipv4 = (ip_cfg[0] or {}).get("ipv4") or {}
+            sub_block = ipv4.get("ipSubnet") or {}
+            ip_val = (sub_block.get("ip") or {}).get("value")
+            prefix = sub_block.get("prefixLength")
+            gw = (ipv4.get("defaultGatewayIp") or {}).get("value")
+            if ip_val and prefix is not None:
+                ip_summary = f"{ip_val}/{prefix}"
+                if gw:
+                    ip_summary += f" gw {gw}"
+
+        out.append(
+            {
+                "extId": sub.get("extId"),
+                "name": sub.get("name"),
+                "vlan": sub.get("networkId"),
+                "subnetType": sub.get("subnetType"),
+                "isAdvancedNetworking": bool(sub.get("isAdvancedNetworking")),
+                "virtualSwitchExtId": vs_ref,
+                "virtualSwitchName": vs_names.get(vs_ref) if vs_ref else None,
+                "description": sub.get("description"),
+                "ipSummary": ip_summary,
+            }
+        )
+
+    out.sort(
+        key=lambda x: (
+            x.get("vlan") if isinstance(x.get("vlan"), int) else 99999,
+            (x.get("name") or "").lower(),
+        )
+    )
+
+    total = meta.get("totalAvailableResults")
+    truncated = isinstance(total, int) and total > len(data)
+    return jsonify(
+        subnets=out,
+        truncated=truncated,
+        total=total if isinstance(total, int) else None,
+    )
+
+
 def _list_existing_subnet_names_on_cluster(
     session: requests.Session, base_url: str, cluster_uuid: str
 ) -> tuple[set[str], bool]:

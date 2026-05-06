@@ -373,10 +373,6 @@
           <label for="pc-host">PC IP / FQDN</label>
           <input type="text" id="pc-host" placeholder="10.0.0.10" autocomplete="off" />
         </div>
-        <div class="field" style="flex: 0 1 110px; min-width: 100px;">
-          <label for="pc-port">Port</label>
-          <input type="number" id="pc-port" value="9440" min="1" max="65535" />
-        </div>
         <div class="field auth-basic" style="flex: 1 1 160px;">
           <label for="pc-user">Username</label>
           <input type="text" id="pc-user" value="admin" autocomplete="username" />
@@ -399,17 +395,13 @@
     <!-- Step 2: Cluster -->
     <section class="card" id="card-cluster">
       <h2>2. Target cluster</h2>
-      <div class="hint">Pick the AHV cluster (PE) where the subnets will be created.</div>
+      <div class="hint">Pick the AHV cluster (PE) where the subnets will be created. Reconnect in step 1 to refresh this list.</div>
       <div class="row">
         <div class="field">
           <label for="cluster-select">Cluster</label>
           <select id="cluster-select" disabled>
             <option value="">-- connect first --</option>
           </select>
-        </div>
-        <div class="field" style="flex: 0 0 auto;">
-          <label>&nbsp;</label>
-          <button class="secondary" id="btn-refresh-clusters" disabled>Refresh</button>
         </div>
       </div>
     </section>
@@ -523,9 +515,47 @@
       </div>
     </section>
 
-    <!-- Step 4: Networks -->
+    <!-- Step 4: Existing networks on target cluster -->
+    <section class="card" id="card-target-subnets">
+      <div style="display:flex; align-items:center;">
+        <h2>4. Existing networks on target cluster</h2>
+        <span class="status" id="target-subnets-status"><span class="dot"></span><span class="text">No data</span></span>
+      </div>
+      <div class="hint">
+        Subnets currently visible on the selected cluster. Refresh after a
+        create run to verify that everything you intended to create actually
+        landed.
+      </div>
+      <div class="row">
+        <div class="field" style="flex: 0 0 auto;">
+          <label>&nbsp;</label>
+          <button class="secondary" id="btn-refresh-target-subnets" disabled>Refresh</button>
+        </div>
+        <div class="field" style="flex: 1 1 auto;">
+          <label>&nbsp;</label>
+          <div class="summary-line" id="target-subnets-meta">&mdash;</div>
+        </div>
+      </div>
+      <div class="source-table-wrap" id="target-subnets-wrap" style="display:none;">
+        <table class="source-table">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>VLAN</th>
+              <th>Type</th>
+              <th>Virtual switch</th>
+              <th>Advanced</th>
+              <th>IP / description</th>
+            </tr>
+          </thead>
+          <tbody id="target-subnets-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Step 5: Networks -->
     <section class="card" id="card-networks">
-      <h2>4. Networks to create</h2>
+      <h2>5. Networks to create</h2>
       <div class="hint">
         One per line. Format:
         <code>name,vlan</code>
@@ -540,7 +570,7 @@ network_VLAN_1003 1003"></textarea>
       <div class="summary-line" id="parse-summary">Parsed: 0 valid, 0 issue(s).</div>
     </section>
 
-    <!-- Step 5: Create -->
+    <!-- Step 6: Create -->
     <section class="card" id="card-create">
       <div class="actions">
         <button id="btn-create" disabled>Create networks</button>
@@ -628,7 +658,7 @@ network_VLAN_1003 1003"></textarea>
 
     async function doConnect() {
       const host = $("pc-host").value.trim();
-      const port = parseInt($("pc-port").value, 10) || 9440;
+      const port = 9440;
       const mode = getPcAuthMode();
       const payload = { host, port, auth_mode: mode };
       let identityLabel;
@@ -661,7 +691,6 @@ network_VLAN_1003 1003"></textarea>
           ? "via API key" : `as ${(res.auth && res.auth.username) || "?"}`;
         setStatus("connect-status", "ok", `Connected to ${res.host}`);
         addLog("ok", `Connected to ${res.host} ${who}.`);
-        $("btn-refresh-clusters").disabled = false;
         await loadClusters();
       } catch (e) {
         state.token = null;
@@ -705,6 +734,84 @@ network_VLAN_1003 1003"></textarea>
         sel.innerHTML = '<option value="">(failed to load)</option>';
       }
       updateCreateButton();
+    }
+
+    async function loadTargetSubnets() {
+      const clusterUuid = $("cluster-select").value;
+      const btn = $("btn-refresh-target-subnets");
+      const wrap = $("target-subnets-wrap");
+      const tbody = $("target-subnets-tbody");
+      const meta = $("target-subnets-meta");
+      btn.disabled = !state.token || !clusterUuid;
+      if (!state.token || !clusterUuid) {
+        wrap.style.display = "none";
+        tbody.innerHTML = "";
+        meta.textContent = "—";
+        setStatus("target-subnets-status", null, "No data");
+        return;
+      }
+      btn.disabled = true;
+      setStatus("target-subnets-status", "busy", "Loading...");
+      try {
+        const res = await postJson("/api/target-subnets", {
+          token: state.token,
+          cluster_uuid: clusterUuid,
+        });
+        const subs = res.subnets || [];
+        tbody.innerHTML = "";
+        subs.forEach((s) => {
+          const tr = document.createElement("tr");
+
+          const tdName = document.createElement("td");
+          tdName.className = "col-name";
+          tdName.textContent = s.name || "(unnamed)";
+          tr.appendChild(tdName);
+
+          const tdVlan = document.createElement("td");
+          tdVlan.textContent = (s.vlan === null || s.vlan === undefined) ? "—" : s.vlan;
+          tr.appendChild(tdVlan);
+
+          const tdType = document.createElement("td");
+          tdType.textContent = s.subnetType || "—";
+          tr.appendChild(tdType);
+
+          const tdVs = document.createElement("td");
+          if (s.virtualSwitchName) {
+            tdVs.textContent = s.virtualSwitchName;
+          } else if (s.virtualSwitchExtId) {
+            tdVs.className = "uplinks";
+            tdVs.textContent = s.virtualSwitchExtId.slice(0, 8);
+          } else {
+            tdVs.textContent = "—";
+          }
+          tr.appendChild(tdVs);
+
+          const tdAdv = document.createElement("td");
+          const advBadge = document.createElement("span");
+          advBadge.className = "badge " + (s.isAdvancedNetworking ? "vs" : "");
+          advBadge.textContent = s.isAdvancedNetworking ? "yes" : "no";
+          tdAdv.appendChild(advBadge);
+          tr.appendChild(tdAdv);
+
+          const tdIp = document.createElement("td");
+          tdIp.className = "uplinks";
+          tdIp.textContent = s.ipSummary || s.description || "—";
+          tr.appendChild(tdIp);
+
+          tbody.appendChild(tr);
+        });
+        wrap.style.display = subs.length ? "" : "none";
+        const tail = res.truncated ? " (truncated at 100)" : "";
+        meta.textContent = subs.length
+          ? `${subs.length} subnet(s) on this cluster${tail}.`
+          : "No subnets on this cluster yet.";
+        setStatus("target-subnets-status", "ok", `${subs.length} subnet(s)`);
+      } catch (e) {
+        setStatus("target-subnets-status", "err", "Refresh failed");
+        addLog("error", `Existing-networks refresh failed: ${e.message}`);
+      } finally {
+        btn.disabled = !state.token || !clusterUuid;
+      }
     }
 
     async function loadVirtualSwitches() {
@@ -872,6 +979,7 @@ network_VLAN_1003 1003"></textarea>
       }
       $("btn-create").disabled = false;
       updateCreateButton();
+      loadTargetSubnets();
     }
 
     const sourceState = {
@@ -1249,12 +1357,13 @@ network_VLAN_1003 1003"></textarea>
         el.addEventListener("change", applyPcAuthVisibility);
       });
       applyPcAuthVisibility();
-      $("btn-refresh-clusters").addEventListener("click", loadClusters);
       $("cluster-select").addEventListener("change", () => {
         loadVirtualSwitches();
+        loadTargetSubnets();
         updateCreateButton();
       });
       $("btn-refresh-vs").addEventListener("click", loadVirtualSwitches);
+      $("btn-refresh-target-subnets").addEventListener("click", loadTargetSubnets);
       $("vs-select").addEventListener("change", updateCreateButton);
       $("networks-input").addEventListener("input", parseNetworks);
       $("btn-create").addEventListener("click", doCreate);
