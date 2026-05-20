@@ -1,49 +1,71 @@
 # NP4M
 
-A small Flask web app for **bulk-creating unmanaged AHV subnets** on Nutanix
-via the Prism Central v4 REST APIs, with optional **import of existing
-networks** from another Prism Central, a VMware vCenter, or a standalone
-VMware ESXi host.
+A small Flask web app for **bulk-creating L2 networks on Nutanix AHV or
+VMware vSphere**:
+
+- **Nutanix target** — create unmanaged VLAN subnets on a Prism Central-managed
+  AHV cluster via the Prism Central v4 REST APIs.
+- **VMware target** — create port groups on a Distributed Virtual Switch (VDS)
+  or on a Standard vSwitch (VSS) across one or more ESXi hosts, via the vSphere
+  API (`pyvmomi`).
+
+Both targets share the same UI, the same `name,vlan` textarea, and the same
+optional **source import** from another Prism Central, a vCenter, or a
+standalone ESXi host.
 
 NP4M was built for migration-style workflows where you need to recreate dozens
-of VLAN-backed L2 networks on a target AHV cluster in one shot, mirroring what
-already exists somewhere else.
+of VLAN-backed L2 networks on a destination cluster (AHV or vSphere) in one
+shot, mirroring what already exists somewhere else.
+
+The current page shows a `vX.Y.Z build N` badge next to the title; the
+constants live at the top of `app.py` and are bumped on every commit.
 
 ---
 
 ## Features
 
-- Connect to a target Prism Central via **basic auth** (`admin` + password) **or
-  an API key** (`Authorization: Bearer <token>`).
-- Pick a target AHV cluster (PE) registered to that PC.
-- Pick a virtual switch on that cluster (filtered automatically).
-- (Optional) Connect to a **source PC, vCenter, or standalone ESXi host**
-  and browse its existing subnets / port-groups in a sortable, filterable
-  table:
-  - Nutanix source: clusters, virtual switches, subnets, VLAN, managed/IP
-    config, per-host uplinks.
-  - VMware source: port-group name, VLAN id / trunk / PVLAN, switch name,
-    active/standby uplinks, teaming policy, failback.
-    - Connecting to **vCenter** shows both Distributed Virtual Switches
-      (DVS) and per-host standard vSwitches.
-    - Connecting directly to **a single ESXi host** shows that host's
-      standard vSwitches and port-groups (DVS objects are vCenter-managed
-      and aren't visible from a standalone ESXi connection).
-- Select rows + click "Add selected" to populate the create-list with their
-  `name,vlan` pairs. Names are sanitized to AHV-legal characters; trunks /
-  PVLANs / out-of-range VLANs are flagged and never auto-imported.
-- Paste/edit additional networks freehand.
-- Click **Create networks** and watch a streaming color-coded log: each
-  subnet POST is followed by task polling until `SUCCEEDED` / `FAILED`.
-- Pre-flight **duplicate-name check** against the target cluster (AHV doesn't
-  enforce unique subnet names, so NP4M does it for you).
-- Live **"Existing networks on target cluster"** panel that lists every
-  subnet currently on the selected cluster (name, VLAN, type, virtual
-  switch, advanced flag, IP). Auto-refreshes when you change clusters and
-  again after every Create run, so you can verify what actually landed.
+### Pick a target platform
+- **Nutanix Prism Central** — basic auth (`admin` + password) or an API key
+  (`Authorization: Bearer <token>`). Pick a target AHV cluster (PE) and a
+  virtual switch on it.
+- **VMware vCenter / ESXi** — username + password. Pick whether to target a
+  Distributed Virtual Switch (VDS, vCenter only) or a Standard vSwitch (VSS).
+  For VSS, pick one or more ESXi hosts; the port group is created on each.
 
+### Optional: import from a source
+Connect to **another PC, a vCenter, or a standalone ESXi host** and browse its
+existing subnets / port-groups in a sortable, filterable table:
+- Nutanix source: clusters, virtual switches, subnets, VLAN, managed/IP
+  config, per-host uplinks.
+- VMware source: port-group name, VLAN id / trunk / PVLAN, switch name,
+  active/standby uplinks, teaming policy, failback.
+  - vCenter exposes both DVS and per-host standard vSwitches.
+  - Standalone ESXi exposes only that host's standard vSwitches (DVS objects
+    are vCenter-managed).
+
+Select rows + click "Add selected" to populate the create-list with their
+`name,vlan` pairs. Names are sanitized; trunks / PVLANs / out-of-range VLANs
+are flagged and never auto-imported.
+
+### Create
+- Paste/edit additional networks freehand.
+- Click **Create networks** / **Create port groups** and watch a streaming
+  color-coded log.
+  - Nutanix: each subnet POST is followed by task polling until `SUCCEEDED` /
+    `FAILED`. If the target cluster rejects `isAdvancedNetworking=true`, NP4M
+    transparently retries with `false`.
+  - VMware VDS: a single batched `AddDVPortgroup_Task` is submitted and polled
+    to completion. VMware VSS: `AddPortGroup` is invoked per (host x port
+    group); same-named port groups on a host are reported and skipped.
+- Pre-flight **duplicate-name check** against the destination scope (cluster
+  for Nutanix, DVS for VDS, each host for VSS).
+- Live **"Existing networks / port groups on target"** panel auto-refreshes
+  when you change cluster / switch and again after every Create run, so you
+  can verify what actually landed.
+
+### CLI extras
 A standalone CLI helper (`create_subnets.py`) is included for scripted /
-non-UI provisioning.
+non-UI provisioning of Nutanix subnets.
 
 ---
 
@@ -146,8 +168,18 @@ python app.py
 
 ## Walkthrough
 
-The UI is a single page with six (or seven, if you import) numbered cards.
-Each card unlocks the next one once it's set.
+The UI is a single page with six numbered cards (seven if you use the optional
+source-import card).
+
+### Step 0 — Pick a target platform
+
+At the top of card 1, choose **Nutanix Prism Central** or **VMware vCenter /
+ESXi**. Toggling the radio re-renders cards 2-6 in place; the source-import
+card (3.5) and the streaming log work for either platform. The rest of this
+walkthrough is split into a Nutanix flow and a vCenter flow — pick the one
+that matches your target.
+
+## Walkthrough — Nutanix AHV target
 
 ### 1. Target Prism Central
 
@@ -339,6 +371,105 @@ terminal error state.
 
 ---
 
+## Walkthrough — VMware vSphere target
+
+When the platform toggle is set to **VMware vCenter / ESXi**, cards 1-6 host
+the vCenter flow.
+
+### 1. Target vCenter / ESXi
+
+Provide host, port (default 443), username, and password. NP4M uses
+`pyvmomi`'s `SmartConnect`, which accepts either a vCenter Server or a
+standalone ESXi host. vCenter does not support Bearer-style API keys, so this
+step is username/password only. TLS verification is disabled by default — see
+the security notes below.
+
+> If you connect to a **standalone ESXi host**, only that host's **Standard
+> vSwitches** are visible. DVS objects are vCenter-managed and are not
+> exposed via a direct ESXi connection.
+
+### 2. Target switch type
+
+Pick:
+
+- **Distributed (VDS)** — port groups are created at switch level on a
+  vCenter-managed DVS and propagate to every member host in one task.
+- **Standard (VSS)** — port groups are created per host. You'll pick which
+  hosts get them in step 3.
+
+### 3. Destination switch (+ hosts for VSS)
+
+The dropdown lists every switch of the chosen type visible in this vCenter.
+For VSS, a checklist of hosts that already have that vSwitch is shown
+underneath (with **Select all** / **Clear** shortcuts). NP4M will create the
+port group on every checked host.
+
+### 4. Existing port groups on destination switch
+
+A read-only panel that lists every port group currently on the selected
+switch:
+
+| Column         | Notes                                                            |
+|----------------|------------------------------------------------------------------|
+| Name           | Port group name.                                                 |
+| VLAN           | Numeric VLAN id, or a `TRUNK` / `PVLAN` badge.                   |
+| Switch         | Switch kind badge (`DVS` / `vSwitch`) + switch name.             |
+| Host coverage  | For VSS: list of hosts that already have this port group on this vSwitch. For VDS: `(DVS-wide)`. |
+
+The panel auto-refreshes when you change the switch or host selection, and
+again after every Create run, so successful creates pop in immediately.
+Underneath: `POST /api/target/vcenter/portgroups`.
+
+### 5. Networks to create
+
+Same textarea as the Nutanix flow — one `name,vlan` per line. The same VLAN
+range (0..4094) and duplicate-name rules apply. For VMware targets the lines
+become VDS port group names or VSS port group names, depending on what you
+picked in step 2.
+
+### 6. Create port groups
+
+The button label switches to **Create port groups** in vCenter mode and
+enables once you have {connected, switch picked, ≥1 host for VSS, ≥1 valid
+network}.
+
+**VDS path:** NP4M builds one `DVPortgroupConfigSpec` per requested name and
+submits them in a single `AddDVPortgroup_Task` call. The task is polled to
+`success` or `error`. Default port group type is `earlyBinding` and default
+`numPorts` is 8 (configurable in the request body if you call the endpoint
+directly).
+
+**VSS path:** for each (host x port group), NP4M calls
+`HostNetworkSystem.AddPortGroup` with a `HostPortGroupSpec`. Pre-existing
+port groups on a host raise `vim.fault.AlreadyExists`, which is reported as
+an amber "already exists" line and the run continues.
+
+Sample log:
+
+```
+[10:00:01] Submitting 4 port group(s) to VDS 'DSwitch'.
+[10:00:01] DVS 'DSwitch' currently has 7 port group(s).
+[10:00:01] Queueing dvportgroup 'VMW_VLAN_4001' (VLAN 4001, type=earlyBinding, ports=8).
+[10:00:01] Queueing dvportgroup 'VMW_VLAN_4002' (VLAN 4002, type=earlyBinding, ports=8).
+[10:00:01] Submitting AddDVPortgroup_Task with 4 spec(s)...
+[10:00:04]   OK: dvportgroup 'VMW_VLAN_4001' created.
+[10:00:04]   OK: dvportgroup 'VMW_VLAN_4002' created.
+[10:00:04] Done. 4 succeeded, 0 failed.
+```
+
+Constraints / notes:
+
+- VLAN must be an integer in `0..4094` (VSS treats `4095` as VGT/trunk; NP4M
+  does not create VGT port groups from the UI).
+- For VSS, when a port group with the same name already exists on a host on
+  the same vSwitch, that host is skipped (amber log line) and others
+  continue.
+- For VDS, if any spec in the batch is rejected, the whole task fails — read
+  the localized error in the log, fix the spec, and re-run only the
+  remaining names.
+
+---
+
 ## Optional: CLI mode
 
 If you'd rather drive this from a script (CI, lab provisioning, etc.) without
@@ -371,18 +502,24 @@ same async task polling, same `NTNX-Request-Id` idempotency header.
 
 All endpoints use JSON.
 
-| Method | Path                                | Purpose                                    |
-|--------|-------------------------------------|--------------------------------------------|
-| GET    | `/`                                 | The web UI                                 |
-| POST   | `/api/connect`                      | Connect to target PC, returns `{token}`    |
-| POST   | `/api/clusters`                     | List clusters reachable via target token   |
-| POST   | `/api/virtual-switches`             | List VS, optionally filtered by cluster    |
-| POST   | `/api/target-subnets`               | List existing subnets on a target cluster (verification panel) |
-| POST   | `/api/create`                       | Bulk create (NDJSON streaming response)    |
-| POST   | `/api/source/pc/connect`            | Connect to a *source* PC                   |
-| POST   | `/api/source/pc/inventory`          | Source PC inventory rows                   |
-| POST   | `/api/source/vcenter/connect`       | Connect to a vCenter or ESXi host          |
-| POST   | `/api/source/vcenter/inventory`     | vCenter / ESXi inventory rows              |
+| Method | Path                                  | Purpose                                  |
+|--------|---------------------------------------|------------------------------------------|
+| GET    | `/`                                   | The web UI                               |
+| GET    | `/api/version`                        | `{version, build}` of the running app    |
+| POST   | `/api/connect`                        | Connect to target PC, returns `{token}`  |
+| POST   | `/api/clusters`                       | List clusters reachable via target token |
+| POST   | `/api/virtual-switches`               | List VS, optionally filtered by cluster  |
+| POST   | `/api/target-subnets`                 | Existing subnets on a target cluster     |
+| POST   | `/api/create`                         | Bulk-create AHV subnets (NDJSON stream)  |
+| POST   | `/api/source/pc/connect`              | Connect to a *source* PC                 |
+| POST   | `/api/source/pc/inventory`            | Source PC inventory rows                 |
+| POST   | `/api/source/vcenter/connect`         | Connect to a *source* vCenter / ESXi     |
+| POST   | `/api/source/vcenter/inventory`       | Source vCenter / ESXi inventory rows     |
+| POST   | `/api/target/vcenter/connect`         | Connect to a *target* vCenter / ESXi     |
+| POST   | `/api/target/vcenter/switches`        | List VDS or VSS switches on the target   |
+| POST   | `/api/target/vcenter/hosts`           | List hosts (optionally filtered by VSS)  |
+| POST   | `/api/target/vcenter/portgroups`      | Existing port groups on the target switch|
+| POST   | `/api/target/vcenter/create`          | Bulk-create vSphere port groups (NDJSON) |
 
 Auth bodies (target PC):
 
@@ -396,7 +533,26 @@ Auth bodies (target PC):
 
 Sessions are kept in memory keyed by an opaque token returned by the
 `connect` endpoints. Tokens last for one hour or until process restart.
-Source and target sessions are in separate namespaces — they never collide.
+Nutanix target, source, and vCenter target sessions all live in separate
+namespaces (`SESSIONS`, `SOURCE_SESSIONS`, `TARGET_VCENTER_SESSIONS`) so they
+never collide.
+
+`POST /api/target/vcenter/create` accepts:
+
+```json
+{
+  "target_token": "...",
+  "switch_kind": "vds",
+  "switch_name": "DSwitch",
+  "hosts": ["esx-01.example.com"],
+  "networks": [{"name": "VMW_VLAN_4001", "vlan": 4001}],
+  "pg_type": "earlyBinding",
+  "num_ports": 8
+}
+```
+
+`hosts` is only used for `switch_kind: "vss"`. `pg_type` and `num_ports` are
+only used for `switch_kind: "vds"` (defaults: `earlyBinding`, `8`).
 
 ---
 
@@ -464,6 +620,7 @@ the CLI).
 
 ## Limitations
 
+### Nutanix target
 - **Unmanaged subnets only** by design. NP4M does not currently set IPAM /
   DHCP / IP pools. If you need managed subnets, edit them in PC after
   creation, or extend `_create_unmanaged_subnet` to send `ipConfig`.
@@ -471,10 +628,23 @@ the CLI).
 - **Single virtual switch per batch**. The whole networks list goes onto the
   one VS you picked.
 - **CLI does not support API-key auth** (web UI does).
+
+### VMware target
+- **VLAN port groups only**. NP4M sends a `VlanIdSpec`; trunk and PVLAN port
+  groups are not created from the UI.
+- **VDS defaults**: `type=earlyBinding`, `numPorts=8`. Override via the JSON
+  body of `/api/target/vcenter/create` if you need different values.
+- **VSS is per-host**: NP4M iterates the host list you selected and creates
+  the port group on each. Same-named port groups on a host are reported and
+  skipped; others continue.
+- **No edit / delete from the UI**. NP4M is a creator; manage existing port
+  groups in vCenter / Host Client.
+- **API-key auth is not supported for vCenter** — vCenter's `SmartConnect`
+  only accepts SSO username/password.
 - **VMware path live-tested only against a small lab**. Standard switches,
   DVS port-groups, PVLAN/Trunk decoding, and teaming policies are all
   coded but YMMV across vCenter / ESXi versions.
-- **Standalone ESXi sources see only standard vSwitches**, never DVS
+- **Standalone ESXi connections only see standard vSwitches**, never DVS
   port-groups (DVS is vCenter-managed). This is a VMware constraint.
 
 ---
