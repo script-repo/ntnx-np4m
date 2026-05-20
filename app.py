@@ -47,10 +47,14 @@ from flask import (
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+__version__ = "0.2.0"
+BUILD = 2   # bump on every commit
+
 app = Flask(__name__)
 
 SESSIONS: dict[str, dict[str, Any]] = {}
 SOURCE_SESSIONS: dict[str, dict[str, Any]] = {}
+TARGET_VCENTER_SESSIONS: dict[str, dict[str, Any]] = {}
 SESSION_TTL_SECONDS = 3600
 
 
@@ -138,6 +142,18 @@ def _get_source_session(token: str | None) -> dict[str, Any] | None:
     return sess
 
 
+def _get_target_vcenter_session(token: str | None) -> dict[str, Any] | None:
+    if not token:
+        return None
+    sess = TARGET_VCENTER_SESSIONS.get(token)
+    if not sess:
+        return None
+    if time.time() - sess["created_at"] > SESSION_TTL_SECONDS:
+        TARGET_VCENTER_SESSIONS.pop(token, None)
+        return None
+    return sess
+
+
 def _wait_for_task(
     session: requests.Session,
     base_url: str,
@@ -201,7 +217,12 @@ def _format_api_error(payload: Any) -> str:
 
 @app.get("/")
 def index():
-    return render_template("index.html")
+    return render_template("index.html", version=__version__, build=BUILD)
+
+
+@app.get("/api/version")
+def api_version():
+    return jsonify(version=__version__, build=BUILD)
 
 
 def _auth_from_body(body: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
@@ -1235,6 +1256,627 @@ def api_source_vcenter_inventory():
             Disconnect(si)
         except Exception:
             pass
+
+
+# ---------------------------------------------------------------------------
+# Target vCenter / ESXi: write-side endpoints for creating port groups on a
+# VMware Standard vSwitch (VSS, per host) or a Distributed Virtual Switch
+# (VDS, vCenter only). Sessions live in TARGET_VCENTER_SESSIONS so they do
+# not collide with the source-side vCenter session namespace.
+# ---------------------------------------------------------------------------
+
+
+def _target_vcenter_connect_si(sess: dict[str, Any]):
+    """Open a fresh ServiceInstance for the duration of a request.
+
+    Mirrors the pattern used by api_source_vcenter_inventory: we do not hold
+    long-lived vCenter sessions in process memory, only the credentials.
+    """
+    SmartConnect, Disconnect, vim, imp_err = _try_import_pyvmomi()
+    if imp_err is not None:
+        raise RuntimeError(f"pyvmomi is not installed: {imp_err}")
+    import ssl as _ssl
+
+    ctx = _ssl.create_default_context()
+    if sess.get("ignore_ssl", True):
+        ctx.check_hostname = False
+        ctx.verify_mode = _ssl.CERT_NONE
+    si = SmartConnect(
+        host=sess["host"], port=sess["port"], user=sess["username"],
+        pwd=sess["password"], sslContext=ctx, connectionPoolTimeout=15,
+    )
+    return SmartConnect, Disconnect, vim, si
+
+
+@app.post("/api/target/vcenter/connect")
+def api_target_vcenter_connect():
+    SmartConnect, Disconnect, vim, imp_err = _try_import_pyvmomi()
+    if imp_err is not None:
+        return (
+            jsonify(
+                error=(
+                    "pyvmomi is not installed in this environment. "
+                    "Run: python -m pip install -r requirements.txt"
+                ),
+                detail=str(imp_err),
+            ),
+            503,
+        )
+    body = request.get_json(force=True, silent=True) or {}
+    host = (body.get("host") or "").strip()
+    port = body.get("port") or 443
+    username = (body.get("username") or "").strip()
+    password = body.get("password") or ""
+    ignore_ssl = bool(body.get("ignore_ssl", True))
+    if not host or not username or not password:
+        return jsonify(error="host, username, and password are required"), 400
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        return jsonify(error="port must be an integer"), 400
+
+    import ssl as _ssl
+
+    ctx = _ssl.create_default_context()
+    if ignore_ssl:
+        ctx.check_hostname = False
+        ctx.verify_mode = _ssl.CERT_NONE
+    try:
+        si = SmartConnect(
+            host=host, port=port, user=username, pwd=password, sslContext=ctx,
+            connectionPoolTimeout=15,
+        )
+    except Exception as exc:
+        msg = str(exc)
+        lower = msg.lower()
+        if "incorrect user name or password" in lower or "cannot complete login" in lower:
+            return jsonify(error="invalid vCenter credentials"), 401
+        return jsonify(error=f"vCenter connect failed: {msg}"), 502
+    about = None
+    try:
+        about = si.content.about
+    except Exception:
+        pass
+    token = secrets.token_urlsafe(24)
+    TARGET_VCENTER_SESSIONS[token] = {
+        "kind": "vcenter",
+        "host": host,
+        "port": port,
+        "username": username,
+        "password": password,
+        "ignore_ssl": ignore_ssl,
+        "created_at": time.time(),
+    }
+    try:
+        Disconnect(si)
+    except Exception:
+        pass
+    return jsonify(
+        target_token=token,
+        kind="vcenter",
+        host=host,
+        port=port,
+        username=username,
+        about={
+            "name": getattr(about, "name", None),
+            "version": getattr(about, "version", None),
+            "build": getattr(about, "build", None),
+            "fullName": getattr(about, "fullName", None),
+            "apiType": getattr(about, "apiType", None),
+        },
+    )
+
+
+def _collect(content, vim, vim_type):
+    view = content.viewManager.CreateContainerView(
+        content.rootFolder, [vim_type], True
+    )
+    try:
+        return list(view.view)
+    finally:
+        try:
+            view.Destroy()
+        except Exception:
+            pass
+
+
+@app.post("/api/target/vcenter/switches")
+def api_target_vcenter_switches():
+    body = request.get_json(force=True, silent=True) or {}
+    sess = _get_target_vcenter_session(body.get("target_token"))
+    if not sess:
+        return jsonify(error="not connected to a target vCenter"), 401
+    switch_kind = (body.get("switch_kind") or "").strip().lower()
+    if switch_kind not in {"vss", "vds"}:
+        return jsonify(error="switch_kind must be 'vss' or 'vds'"), 400
+    try:
+        _, Disconnect, vim, si = _target_vcenter_connect_si(sess)
+    except RuntimeError as exc:
+        return jsonify(error=str(exc)), 503
+    except Exception as exc:
+        return jsonify(error=f"vCenter reconnect failed: {exc}"), 502
+    try:
+        content = si.content
+        if switch_kind == "vds":
+            out: list[dict[str, Any]] = []
+            for dvs in _collect(content, vim, vim.DistributedVirtualSwitch):
+                hosts: list[str] = []
+                try:
+                    for member in dvs.config.host or []:
+                        host_ref = getattr(member, "config", None)
+                        host = getattr(host_ref, "host", None) if host_ref else None
+                        name = getattr(host, "name", None)
+                        if name:
+                            hosts.append(name)
+                except Exception:
+                    pass
+                out.append(
+                    {
+                        "name": getattr(dvs, "name", None),
+                        "uuid": getattr(dvs, "uuid", None),
+                        "hosts": hosts,
+                    }
+                )
+            out.sort(key=lambda x: (x.get("name") or "").lower())
+            return jsonify(kind="vds", switches=out)
+
+        coverage: dict[str, set[str]] = {}
+        for host in _collect(content, vim, vim.HostSystem):
+            try:
+                ns = host.config.network
+            except Exception:
+                continue
+            host_name = getattr(host, "name", None) or "(unknown)"
+            for vsw in getattr(ns, "vswitch", []) or []:
+                vsw_name = getattr(vsw, "name", None)
+                if not vsw_name:
+                    continue
+                coverage.setdefault(vsw_name, set()).add(host_name)
+        out_vss = [
+            {"name": name, "hosts": sorted(hosts)}
+            for name, hosts in coverage.items()
+        ]
+        out_vss.sort(key=lambda x: x["name"].lower())
+        return jsonify(kind="vss", switches=out_vss)
+    except Exception as exc:
+        return jsonify(error=f"vCenter switch list failed: {exc}"), 502
+    finally:
+        try:
+            Disconnect(si)
+        except Exception:
+            pass
+
+
+@app.post("/api/target/vcenter/hosts")
+def api_target_vcenter_hosts():
+    body = request.get_json(force=True, silent=True) or {}
+    sess = _get_target_vcenter_session(body.get("target_token"))
+    if not sess:
+        return jsonify(error="not connected to a target vCenter"), 401
+    vswitch_name = (body.get("vswitch_name") or "").strip()
+    try:
+        _, Disconnect, vim, si = _target_vcenter_connect_si(sess)
+    except RuntimeError as exc:
+        return jsonify(error=str(exc)), 503
+    except Exception as exc:
+        return jsonify(error=f"vCenter reconnect failed: {exc}"), 502
+    try:
+        out: list[dict[str, Any]] = []
+        for host in _collect(si.content, vim, vim.HostSystem):
+            host_name = getattr(host, "name", None) or ""
+            if vswitch_name:
+                try:
+                    names = [
+                        getattr(v, "name", None)
+                        for v in getattr(host.config.network, "vswitch", []) or []
+                    ]
+                except Exception:
+                    names = []
+                if vswitch_name not in (names or []):
+                    continue
+            out.append(
+                {
+                    "name": host_name,
+                    "moid": getattr(host, "_moId", None),
+                }
+            )
+        out.sort(key=lambda x: x["name"].lower())
+        return jsonify(hosts=out)
+    except Exception as exc:
+        return jsonify(error=f"vCenter host list failed: {exc}"), 502
+    finally:
+        try:
+            Disconnect(si)
+        except Exception:
+            pass
+
+
+def _vds_pg_rows(vim, dvs) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    try:
+        pgs = list(dvs.portgroup or [])
+    except Exception:
+        pgs = []
+    for pg in pgs:
+        try:
+            if getattr(pg.config, "uplink", False):
+                continue
+        except Exception:
+            pass
+        name = getattr(pg, "name", None) or getattr(pg.config, "name", None)
+        vlan_id = None
+        vlan_kind = "unknown"
+        try:
+            spec = pg.config.defaultPortConfig.vlan
+            if isinstance(spec, vim.dvs.VmwareDistributedVirtualSwitch.TrunkVlanSpec):
+                vlan_kind = "trunk"
+            elif isinstance(spec, vim.dvs.VmwareDistributedVirtualSwitch.PvlanSpec):
+                vlan_kind = "pvlan"
+                vlan_id = getattr(spec, "pvlanId", None)
+            elif isinstance(spec, vim.dvs.VmwareDistributedVirtualSwitch.VlanIdSpec):
+                vid = getattr(spec, "vlanId", 0) or 0
+                vlan_id = vid if vid > 0 else None
+                vlan_kind = "single" if vid > 0 else "none"
+        except Exception:
+            pass
+        rows.append(
+            {
+                "name": name,
+                "vlan": vlan_id,
+                "vlanKind": vlan_kind,
+                "switchKind": "DVS",
+                "switchName": getattr(dvs, "name", None),
+                "hosts": [],
+            }
+        )
+    return rows
+
+
+def _vss_pg_rows(
+    vim, content, vswitch_name: str, host_filter: list[str] | None
+) -> list[dict[str, Any]]:
+    by_key: dict[tuple[str, int | None, str], dict[str, Any]] = {}
+    wanted = set(host_filter) if host_filter else None
+    for host in _collect(content, vim, vim.HostSystem):
+        host_name = getattr(host, "name", None) or ""
+        if wanted and host_name not in wanted:
+            continue
+        try:
+            pgs = getattr(host.config.network, "portgroup", []) or []
+        except Exception:
+            pgs = []
+        for pg in pgs:
+            spec = getattr(pg, "spec", None)
+            if not spec:
+                continue
+            if getattr(spec, "vswitchName", None) != vswitch_name:
+                continue
+            name = getattr(spec, "name", None)
+            vlan_raw = getattr(spec, "vlanId", 0) or 0
+            if vlan_raw == 4095:
+                vlan_id, vlan_kind = None, "trunk"
+            elif vlan_raw == 0:
+                vlan_id, vlan_kind = None, "none"
+            else:
+                vlan_id, vlan_kind = vlan_raw, "single"
+            key = (name or "", vlan_id, vlan_kind)
+            row = by_key.get(key)
+            if row is None:
+                row = {
+                    "name": name,
+                    "vlan": vlan_id,
+                    "vlanKind": vlan_kind,
+                    "switchKind": "vSwitch",
+                    "switchName": vswitch_name,
+                    "hosts": [],
+                }
+                by_key[key] = row
+            row["hosts"].append(host_name)
+    return list(by_key.values())
+
+
+@app.post("/api/target/vcenter/portgroups")
+def api_target_vcenter_portgroups():
+    body = request.get_json(force=True, silent=True) or {}
+    sess = _get_target_vcenter_session(body.get("target_token"))
+    if not sess:
+        return jsonify(error="not connected to a target vCenter"), 401
+    switch_kind = (body.get("switch_kind") or "").strip().lower()
+    switch_name = (body.get("switch_name") or "").strip()
+    hosts = body.get("hosts") or []
+    if switch_kind not in {"vss", "vds"}:
+        return jsonify(error="switch_kind must be 'vss' or 'vds'"), 400
+    if not switch_name:
+        return jsonify(error="switch_name is required"), 400
+    try:
+        _, Disconnect, vim, si = _target_vcenter_connect_si(sess)
+    except RuntimeError as exc:
+        return jsonify(error=str(exc)), 503
+    except Exception as exc:
+        return jsonify(error=f"vCenter reconnect failed: {exc}"), 502
+    try:
+        content = si.content
+        if switch_kind == "vds":
+            target = None
+            for dvs in _collect(content, vim, vim.DistributedVirtualSwitch):
+                if getattr(dvs, "name", None) == switch_name:
+                    target = dvs
+                    break
+            if not target:
+                return jsonify(error=f"DVS '{switch_name}' not found"), 404
+            rows = _vds_pg_rows(vim, target)
+        else:
+            rows = _vss_pg_rows(vim, content, switch_name, hosts)
+        rows.sort(
+            key=lambda r: (
+                r.get("vlan") if isinstance(r.get("vlan"), int) else 99999,
+                (r.get("name") or "").lower(),
+            )
+        )
+        return jsonify(rows=rows)
+    except Exception as exc:
+        return jsonify(error=f"vCenter portgroup list failed: {exc}"), 502
+    finally:
+        try:
+            Disconnect(si)
+        except Exception:
+            pass
+
+
+def _wait_for_vim_task(task, timeout_seconds: int = 120, poll_interval: float = 1.5):
+    """Block until a pyvmomi task reaches success or error."""
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        try:
+            state = task.info.state
+        except Exception:
+            state = None
+        if str(state) in {"success", "TaskInfoState.success"}:
+            return "success", None
+        if str(state) in {"error", "TaskInfoState.error"}:
+            err = None
+            try:
+                err = task.info.error.localizedMessage
+            except Exception:
+                pass
+            return "error", err or "task reported error"
+        time.sleep(poll_interval)
+    return "timeout", f"task did not finish within {timeout_seconds}s"
+
+
+@app.post("/api/target/vcenter/create")
+def api_target_vcenter_create():
+    body = request.get_json(force=True, silent=True) or {}
+    sess = _get_target_vcenter_session(body.get("target_token"))
+    if not sess:
+        return jsonify(error="not connected to a target vCenter"), 401
+    switch_kind = (body.get("switch_kind") or "").strip().lower()
+    switch_name = (body.get("switch_name") or "").strip()
+    hosts = body.get("hosts") or []
+    networks = body.get("networks") or []
+    pg_type = (body.get("pg_type") or "earlyBinding").strip()
+    try:
+        num_ports = int(body.get("num_ports") or 8)
+    except (TypeError, ValueError):
+        return jsonify(error="num_ports must be an integer"), 400
+    task_timeout = 120
+    try:
+        task_timeout = int(body.get("task_timeout") or 120)
+    except (TypeError, ValueError):
+        pass
+
+    if switch_kind not in {"vss", "vds"}:
+        return jsonify(error="switch_kind must be 'vss' or 'vds'"), 400
+    if not switch_name:
+        return jsonify(error="switch_name is required"), 400
+    if not isinstance(networks, list) or not networks:
+        return jsonify(error="networks list is required"), 400
+    if switch_kind == "vss" and not hosts:
+        return jsonify(error="hosts is required for VSS create"), 400
+
+    def emit(level: str, msg: str) -> str:
+        return json.dumps({"level": level, "msg": msg}) + "\n"
+
+    def gen():
+        try:
+            _, Disconnect, vim, si = _target_vcenter_connect_si(sess)
+        except RuntimeError as exc:
+            yield emit("error", str(exc))
+            return
+        except Exception as exc:
+            yield emit("error", f"vCenter reconnect failed: {exc}")
+            return
+        try:
+            content = si.content
+            valid: list[tuple[str, int]] = []
+            for net in networks:
+                name = (net or {}).get("name")
+                vlan = (net or {}).get("vlan")
+                if not name or vlan is None:
+                    yield emit("error", f"Skipping invalid entry: {net!r}")
+                    continue
+                try:
+                    vlan_i = int(vlan)
+                except (TypeError, ValueError):
+                    yield emit("error", f"{name}: invalid VLAN {vlan!r}")
+                    continue
+                if vlan_i < 0 or vlan_i > 4094:
+                    yield emit("error", f"{name}: VLAN out of range ({vlan_i})")
+                    continue
+                valid.append((name, vlan_i))
+
+            if not valid:
+                yield emit("error", "No valid networks to create.")
+                return
+
+            success = 0
+            fail = 0
+
+            if switch_kind == "vds":
+                target = None
+                for dvs in _collect(content, vim, vim.DistributedVirtualSwitch):
+                    if getattr(dvs, "name", None) == switch_name:
+                        target = dvs
+                        break
+                if not target:
+                    yield emit("error", f"DVS '{switch_name}' not found.")
+                    return
+
+                existing_lower: set[str] = set()
+                try:
+                    for pg in list(target.portgroup or []):
+                        n = getattr(pg, "name", None)
+                        if n:
+                            existing_lower.add(n.lower())
+                except Exception:
+                    pass
+                yield emit(
+                    "info",
+                    f"DVS '{switch_name}' currently has {len(existing_lower)} "
+                    f"port group(s).",
+                )
+
+                specs: list[Any] = []
+                queued: list[str] = []
+                for name, vlan_i in valid:
+                    if name.lower() in existing_lower:
+                        yield emit(
+                            "error",
+                            f"Skipping '{name}': a dvportgroup with that name "
+                            f"already exists on DVS '{switch_name}'.",
+                        )
+                        fail += 1
+                        continue
+                    vlan_spec = vim.dvs.VmwareDistributedVirtualSwitch.VlanIdSpec(
+                        inherited=False, vlanId=vlan_i,
+                    )
+                    port_setting = (
+                        vim.dvs.VmwareDistributedVirtualSwitch.VmwarePortConfigPolicy(
+                            vlan=vlan_spec,
+                        )
+                    )
+                    pg_spec = vim.dvs.DistributedVirtualPortgroup.ConfigSpec(
+                        name=name,
+                        numPorts=num_ports,
+                        type=pg_type,
+                        defaultPortConfig=port_setting,
+                    )
+                    specs.append(pg_spec)
+                    queued.append(name)
+                    yield emit(
+                        "info",
+                        f"Queueing dvportgroup '{name}' (VLAN {vlan_i}, "
+                        f"type={pg_type}, ports={num_ports}).",
+                    )
+
+                if specs:
+                    yield emit(
+                        "info",
+                        f"Submitting AddDVPortgroup_Task with {len(specs)} spec(s)..."
+                    )
+                    try:
+                        task = target.AddDVPortgroup_Task(specs)
+                    except Exception as exc:
+                        yield emit("error", f"AddDVPortgroup_Task failed: {exc}")
+                        fail += len(specs)
+                    else:
+                        state, err = _wait_for_vim_task(task, timeout_seconds=task_timeout)
+                        if state == "success":
+                            for n in queued:
+                                yield emit("ok", f"  OK: dvportgroup '{n}' created.")
+                                existing_lower.add(n.lower())
+                                success += 1
+                        else:
+                            yield emit(
+                                "error",
+                                f"  FAIL: AddDVPortgroup_Task {state}: {err}",
+                            )
+                            fail += len(specs)
+            else:
+                wanted = set(hosts)
+                host_objs: dict[str, Any] = {}
+                for host in _collect(content, vim, vim.HostSystem):
+                    n = getattr(host, "name", None)
+                    if n and n in wanted:
+                        host_objs[n] = host
+                missing = sorted(wanted - set(host_objs.keys()))
+                if missing:
+                    yield emit("warn", f"  hosts not found in vCenter: {missing}")
+
+                yield emit(
+                    "info",
+                    f"Creating port groups on vSwitch '{switch_name}' across "
+                    f"{len(host_objs)} host(s).",
+                )
+
+                for host_name, host in host_objs.items():
+                    try:
+                        existing = {
+                            getattr(pg.spec, "name", None)
+                            for pg in getattr(host.config.network, "portgroup", []) or []
+                            if getattr(pg.spec, "vswitchName", None) == switch_name
+                        }
+                    except Exception:
+                        existing = set()
+                    existing_lower = {
+                        (n or "").lower() for n in existing if n
+                    }
+                    ns = host.configManager.networkSystem
+                    for name, vlan_i in valid:
+                        if name.lower() in existing_lower:
+                            yield emit(
+                                "warn",
+                                f"  '{name}' already on '{host_name}': skipped.",
+                            )
+                            continue
+                        yield emit(
+                            "info",
+                            f"Creating port group '{name}' (VLAN {vlan_i}) "
+                            f"on host '{host_name}' / vSwitch '{switch_name}'...",
+                        )
+                        spec = vim.host.PortGroup.Specification(
+                            name=name,
+                            vlanId=vlan_i,
+                            vswitchName=switch_name,
+                            policy=vim.host.NetworkPolicy(),
+                        )
+                        try:
+                            ns.AddPortGroup(spec)
+                        except vim.fault.AlreadyExists:
+                            yield emit(
+                                "warn",
+                                f"  '{name}' on '{host_name}': already exists.",
+                            )
+                            continue
+                        except Exception as exc:
+                            yield emit(
+                                "error",
+                                f"  FAIL: '{name}' on '{host_name}': {exc}",
+                            )
+                            fail += 1
+                            continue
+                        yield emit(
+                            "ok",
+                            f"  OK: '{name}' created on '{host_name}'.",
+                        )
+                        existing_lower.add(name.lower())
+                        success += 1
+
+            yield emit(
+                "info",
+                f"Done. {success} succeeded, {fail} failed.",
+            )
+        finally:
+            try:
+                Disconnect(si)
+            except Exception:
+                pass
+
+    return Response(
+        stream_with_context(gen()),
+        mimetype="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 if __name__ == "__main__":

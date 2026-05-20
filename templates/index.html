@@ -255,12 +255,46 @@
     }
     .pill.gray { background: #f3f4f6; color: #4b5563; }
 
+    .version-badge {
+      display: inline-block;
+      margin-left: 10px;
+      padding: 1px 8px;
+      border-radius: 999px;
+      background: #1f2430;
+      color: #9ca3af;
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: 0.3px;
+      vertical-align: middle;
+    }
+
     .auth-toggle {
       display: flex;
       gap: 14px;
       margin-bottom: 12px;
       flex-wrap: wrap;
     }
+    .platform-toggle {
+      margin-bottom: 14px;
+    }
+    .platform-toggle label.radio { font-weight: 600; }
+
+    .host-list {
+      max-height: 160px;
+      overflow-y: auto;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 6px 10px;
+      background: #fff;
+    }
+    .host-list label {
+      display: block;
+      font-size: 13px;
+      padding: 3px 0;
+      cursor: pointer;
+      user-select: none;
+    }
+    .host-list label input { margin-right: 6px; accent-color: var(--accent); }
     .auth-toggle .radio {
       display: inline-flex;
       align-items: center;
@@ -346,80 +380,167 @@
 
 <body>
   <header>
-    <h1>NP4M</h1>
-    <div class="sub">Bulk-create unmanaged AHV subnets &mdash; with optional import from another Prism Central, VMware vCenter, or standalone ESXi host</div>
+    <h1>NP4M <span class="version-badge">v{{ version }} build {{ build }}</span></h1>
+    <div class="sub">Bulk-create networks on Nutanix AHV or VMware vSphere &mdash; with optional import from another Prism Central, VMware vCenter, or standalone ESXi host</div>
   </header>
 
   <main>
     <!-- Step 1: Connect -->
     <section class="card" id="card-connect">
       <div style="display:flex; align-items:center;">
-        <h2>1. Target Prism Central</h2>
+        <h2>1. Target</h2>
         <span class="status" id="connect-status"><span class="dot"></span><span class="text">Not connected</span></span>
       </div>
-      <div class="hint">Connect to the Prism Central that manages your AHV cluster(s).</div>
-      <div class="auth-toggle">
+      <div class="hint">Choose a platform, then connect.</div>
+
+      <div class="auth-toggle platform-toggle">
         <label class="radio">
-          <input type="radio" name="pc-auth" value="basic" checked />
-          <span>Username + password</span>
+          <input type="radio" name="target-platform" value="nutanix" checked />
+          <span>Nutanix Prism Central</span>
         </label>
         <label class="radio">
-          <input type="radio" name="pc-auth" value="token" />
-          <span>API key (Bearer)</span>
+          <input type="radio" name="target-platform" value="vcenter" />
+          <span>VMware vCenter / ESXi</span>
         </label>
       </div>
-      <div class="row">
-        <div class="field" style="flex: 2 1 220px;">
-          <label for="pc-host">PC IP / FQDN</label>
-          <input type="text" id="pc-host" placeholder="10.0.0.10" autocomplete="off" />
+
+      <!-- Nutanix connect fields -->
+      <div class="platform-nutanix">
+        <div class="auth-toggle">
+          <label class="radio">
+            <input type="radio" name="pc-auth" value="basic" checked />
+            <span>Username + password</span>
+          </label>
+          <label class="radio">
+            <input type="radio" name="pc-auth" value="token" />
+            <span>API key (Bearer)</span>
+          </label>
         </div>
-        <div class="field auth-basic" style="flex: 1 1 160px;">
-          <label for="pc-user">Username</label>
-          <input type="text" id="pc-user" value="admin" autocomplete="username" />
+        <div class="row">
+          <div class="field" style="flex: 2 1 220px;">
+            <label for="pc-host">PC IP / FQDN</label>
+            <input type="text" id="pc-host" placeholder="10.0.0.10" autocomplete="off" />
+          </div>
+          <div class="field auth-basic" style="flex: 1 1 160px;">
+            <label for="pc-user">Username</label>
+            <input type="text" id="pc-user" value="admin" autocomplete="username" />
+          </div>
+          <div class="field auth-basic" style="flex: 1 1 160px;">
+            <label for="pc-pass">Password</label>
+            <input type="password" id="pc-pass" autocomplete="current-password" />
+          </div>
+          <div class="field auth-token" style="flex: 2 1 320px; display:none;">
+            <label for="pc-token">API key</label>
+            <input type="password" id="pc-token" placeholder="Paste PC API key (Bearer prefix optional)" autocomplete="off" />
+          </div>
+          <div class="field" style="flex: 0 0 auto; min-width: 0;">
+            <label>&nbsp;</label>
+            <button id="btn-connect">Connect</button>
+          </div>
         </div>
-        <div class="field auth-basic" style="flex: 1 1 160px;">
-          <label for="pc-pass">Password</label>
-          <input type="password" id="pc-pass" autocomplete="current-password" />
-        </div>
-        <div class="field auth-token" style="flex: 2 1 320px; display:none;">
-          <label for="pc-token">API key</label>
-          <input type="password" id="pc-token" placeholder="Paste PC API key (Bearer prefix optional)" autocomplete="off" />
-        </div>
-        <div class="field" style="flex: 0 0 auto; min-width: 0;">
-          <label>&nbsp;</label>
-          <button id="btn-connect">Connect</button>
+      </div>
+
+      <!-- vCenter connect fields -->
+      <div class="platform-vcenter" style="display:none;">
+        <div class="row">
+          <div class="field" style="flex: 2 1 220px;">
+            <label for="vc-host">vCenter / ESXi host</label>
+            <input type="text" id="vc-host" placeholder="vcenter.example.com" autocomplete="off" />
+          </div>
+          <div class="field" style="flex: 0 1 100px; min-width: 90px;">
+            <label for="vc-port">Port</label>
+            <input type="number" id="vc-port" value="443" min="1" max="65535" />
+          </div>
+          <div class="field" style="flex: 1 1 200px;">
+            <label for="vc-user">Username</label>
+            <input type="text" id="vc-user" placeholder="administrator@vsphere.local" autocomplete="off" />
+          </div>
+          <div class="field" style="flex: 1 1 160px;">
+            <label for="vc-pass">Password</label>
+            <input type="password" id="vc-pass" autocomplete="off" />
+          </div>
+          <div class="field" style="flex: 0 0 auto; min-width: 0;">
+            <label>&nbsp;</label>
+            <button id="btn-vc-connect">Connect</button>
+          </div>
         </div>
       </div>
     </section>
 
-    <!-- Step 2: Cluster -->
+    <!-- Step 2: Cluster (Nutanix) / Target switch type (vCenter) -->
     <section class="card" id="card-cluster">
-      <h2>2. Target cluster</h2>
-      <div class="hint">Pick the AHV cluster (PE) where the subnets will be created. Reconnect in step 1 to refresh this list.</div>
-      <div class="row">
-        <div class="field">
-          <label for="cluster-select">Cluster</label>
-          <select id="cluster-select" disabled>
-            <option value="">-- connect first --</option>
-          </select>
+      <div class="platform-nutanix">
+        <h2>2. Target cluster</h2>
+        <div class="hint">Pick the AHV cluster (PE) where the subnets will be created. Reconnect in step 1 to refresh this list.</div>
+        <div class="row">
+          <div class="field">
+            <label for="cluster-select">Cluster</label>
+            <select id="cluster-select" disabled>
+              <option value="">-- connect first --</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <div class="platform-vcenter" style="display:none;">
+        <h2>2. Target switch type</h2>
+        <div class="hint">VDS port groups live on a vCenter-managed Distributed Virtual Switch. VSS port groups live on a per-host Standard vSwitch.</div>
+        <div class="auth-toggle">
+          <label class="radio">
+            <input type="radio" name="vc-switch-kind" value="vds" checked />
+            <span>Distributed (VDS)</span>
+          </label>
+          <label class="radio">
+            <input type="radio" name="vc-switch-kind" value="vss" />
+            <span>Standard (VSS, per host)</span>
+          </label>
         </div>
       </div>
     </section>
 
-    <!-- Step 3: Virtual switch -->
+    <!-- Step 3: Virtual switch / DVS / VSS + hosts -->
     <section class="card" id="card-vs">
-      <h2>3. Virtual switch</h2>
-      <div class="hint">Subnets will be attached to this virtual switch on the selected cluster.</div>
-      <div class="row">
-        <div class="field">
-          <label for="vs-select">Virtual switch</label>
-          <select id="vs-select" disabled>
-            <option value="">-- pick a cluster first --</option>
-          </select>
+      <div class="platform-nutanix">
+        <h2>3. Virtual switch</h2>
+        <div class="hint">Subnets will be attached to this virtual switch on the selected cluster.</div>
+        <div class="row">
+          <div class="field">
+            <label for="vs-select">Virtual switch</label>
+            <select id="vs-select" disabled>
+              <option value="">-- pick a cluster first --</option>
+            </select>
+          </div>
+          <div class="field" style="flex: 0 0 auto;">
+            <label>&nbsp;</label>
+            <button class="secondary" id="btn-refresh-vs" disabled>Refresh</button>
+          </div>
         </div>
-        <div class="field" style="flex: 0 0 auto;">
-          <label>&nbsp;</label>
-          <button class="secondary" id="btn-refresh-vs" disabled>Refresh</button>
+      </div>
+      <div class="platform-vcenter" style="display:none;">
+        <h2>3. Destination switch</h2>
+        <div class="hint">Port groups will be created on this switch. For VSS, also pick the hosts that should receive the port groups.</div>
+        <div class="row">
+          <div class="field">
+            <label for="vc-switch-select">Destination switch</label>
+            <select id="vc-switch-select" disabled>
+              <option value="">-- connect first --</option>
+            </select>
+          </div>
+          <div class="field" style="flex: 0 0 auto;">
+            <label>&nbsp;</label>
+            <button class="secondary" id="btn-vc-refresh-switches" disabled>Refresh</button>
+          </div>
+        </div>
+        <div class="row vc-vss-hosts" style="display:none;">
+          <div class="field" style="flex: 1 1 100%;">
+            <label>Hosts (VSS port groups are per-host)</label>
+            <div class="host-list" id="vc-host-list">
+              <div style="color: var(--muted); font-size: 12px;">Pick a vSwitch first.</div>
+            </div>
+            <div style="display:flex; gap:8px; margin-top:6px;">
+              <button class="secondary" id="btn-vc-hosts-all" type="button">Select all</button>
+              <button class="secondary" id="btn-vc-hosts-none" type="button">Clear</button>
+            </div>
+          </div>
         </div>
       </div>
     </section>
@@ -515,41 +636,76 @@
       </div>
     </section>
 
-    <!-- Step 4: Existing networks on target cluster -->
+    <!-- Step 4: Existing networks / port groups on target -->
     <section class="card" id="card-target-subnets">
-      <div style="display:flex; align-items:center;">
-        <h2>4. Existing networks on target cluster</h2>
-        <span class="status" id="target-subnets-status"><span class="dot"></span><span class="text">No data</span></span>
-      </div>
-      <div class="hint">
-        Subnets currently visible on the selected cluster. Refresh after a
-        create run to verify that everything you intended to create actually
-        landed.
-      </div>
-      <div class="row">
-        <div class="field" style="flex: 0 0 auto;">
-          <label>&nbsp;</label>
-          <button class="secondary" id="btn-refresh-target-subnets" disabled>Refresh</button>
+      <div class="platform-nutanix">
+        <div style="display:flex; align-items:center;">
+          <h2>4. Existing networks on target cluster</h2>
+          <span class="status" id="target-subnets-status"><span class="dot"></span><span class="text">No data</span></span>
         </div>
-        <div class="field" style="flex: 1 1 auto;">
-          <label>&nbsp;</label>
-          <div class="summary-line" id="target-subnets-meta">&mdash;</div>
+        <div class="hint">
+          Subnets currently visible on the selected cluster. Refresh after a
+          create run to verify that everything you intended to create actually
+          landed.
+        </div>
+        <div class="row">
+          <div class="field" style="flex: 0 0 auto;">
+            <label>&nbsp;</label>
+            <button class="secondary" id="btn-refresh-target-subnets" disabled>Refresh</button>
+          </div>
+          <div class="field" style="flex: 1 1 auto;">
+            <label>&nbsp;</label>
+            <div class="summary-line" id="target-subnets-meta">&mdash;</div>
+          </div>
+        </div>
+        <div class="source-table-wrap" id="target-subnets-wrap" style="display:none;">
+          <table class="source-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>VLAN</th>
+                <th>Type</th>
+                <th>Virtual switch</th>
+                <th>Advanced</th>
+                <th>IP / description</th>
+              </tr>
+            </thead>
+            <tbody id="target-subnets-tbody"></tbody>
+          </table>
         </div>
       </div>
-      <div class="source-table-wrap" id="target-subnets-wrap" style="display:none;">
-        <table class="source-table">
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>VLAN</th>
-              <th>Type</th>
-              <th>Virtual switch</th>
-              <th>Advanced</th>
-              <th>IP / description</th>
-            </tr>
-          </thead>
-          <tbody id="target-subnets-tbody"></tbody>
-        </table>
+      <div class="platform-vcenter" style="display:none;">
+        <div style="display:flex; align-items:center;">
+          <h2>4. Existing port groups on destination switch</h2>
+          <span class="status" id="vc-pg-status"><span class="dot"></span><span class="text">No data</span></span>
+        </div>
+        <div class="hint">
+          Port groups currently visible on the selected destination switch
+          (VDS scope, or across the selected hosts for VSS).
+        </div>
+        <div class="row">
+          <div class="field" style="flex: 0 0 auto;">
+            <label>&nbsp;</label>
+            <button class="secondary" id="btn-refresh-vc-pgs" disabled>Refresh</button>
+          </div>
+          <div class="field" style="flex: 1 1 auto;">
+            <label>&nbsp;</label>
+            <div class="summary-line" id="vc-pg-meta">&mdash;</div>
+          </div>
+        </div>
+        <div class="source-table-wrap" id="vc-pg-wrap" style="display:none;">
+          <table class="source-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>VLAN</th>
+                <th>Switch</th>
+                <th>Host coverage</th>
+              </tr>
+            </thead>
+            <tbody id="vc-pg-tbody"></tbody>
+          </table>
+        </div>
       </div>
     </section>
 
@@ -560,8 +716,11 @@
         One per line. Format:
         <code>name,vlan</code>
         (comma, whitespace, or tab also accepted). Lines starting with
-        <code>#</code> are ignored. Each subnet will be created
-        <span class="pill">unmanaged</span> (no IPAM / DHCP).
+        <code>#</code> are ignored.
+        <span class="platform-nutanix">Each subnet will be created
+        <span class="pill">unmanaged</span> (no IPAM / DHCP).</span>
+        <span class="platform-vcenter" style="display:none;">Port groups will
+        be created on the selected destination switch.</span>
       </div>
       <textarea id="networks-input" spellcheck="false" placeholder="# example
 network_VLAN_1001,1001
@@ -591,6 +750,7 @@ network_VLAN_1003 1003"></textarea>
 
   <script>
     const state = {
+      platform: "nutanix",
       token: null,
       clusters: [],
       vs: [],
@@ -897,6 +1057,10 @@ network_VLAN_1003 1003"></textarea>
     }
 
     function updateCreateButton() {
+      if (state.platform === "vcenter") {
+        updateVcCreateButton();
+        return;
+      }
       const ok =
         !!state.token &&
         !!$("cluster-select").value &&
@@ -906,6 +1070,9 @@ network_VLAN_1003 1003"></textarea>
     }
 
     async function doCreate() {
+      if (state.platform === "vcenter") {
+        return doVcCreate();
+      }
       const clusterUuid = $("cluster-select").value;
       const vsUuid = $("vs-select").value;
       if (!state.token || !clusterUuid || !vsUuid || state.parsed.networks.length === 0) return;
@@ -1345,6 +1512,344 @@ network_VLAN_1003 1003"></textarea>
       renderSourceTable();
     }
 
+    const vc = {
+      token: null,
+      about: null,
+      switchKind: "vds",
+      switches: [],
+      hostsForVss: [],
+      selectedHosts: new Set(),
+    };
+
+    function getPlatform() {
+      const r = document.querySelector('input[name="target-platform"]:checked');
+      return r ? r.value : "nutanix";
+    }
+
+    function getVcSwitchKind() {
+      const r = document.querySelector('input[name="vc-switch-kind"]:checked');
+      return r ? r.value : "vds";
+    }
+
+    function applyPlatformVisibility() {
+      const p = getPlatform();
+      state.platform = p;
+      document.querySelectorAll(".platform-nutanix").forEach((el) => {
+        el.style.display = p === "nutanix" ? "" : "none";
+      });
+      document.querySelectorAll(".platform-vcenter").forEach((el) => {
+        el.style.display = p === "vcenter" ? "" : "none";
+      });
+      $("btn-create").textContent =
+        p === "vcenter" ? "Create port groups" : "Create networks";
+      setStatus("create-status", null, "Idle");
+      updateCreateButton();
+    }
+
+    async function doVcConnect() {
+      const host = $("vc-host").value.trim();
+      const port = parseInt($("vc-port").value, 10) || 443;
+      const username = $("vc-user").value.trim();
+      const password = $("vc-pass").value;
+      if (!host || !username || !password) {
+        addLog("error", "vCenter host, username, and password are required.");
+        return;
+      }
+      $("btn-vc-connect").disabled = true;
+      setStatus("connect-status", "busy", "Connecting...");
+      addLog("system", `Connecting to vCenter ${host}:${port} as ${username}...`);
+      try {
+        const res = await postJson("/api/target/vcenter/connect", {
+          host, port, username, password, ignore_ssl: true,
+        });
+        vc.token = res.target_token;
+        vc.about = res.about || null;
+        const label = (vc.about && vc.about.fullName)
+          ? `${res.host} (${vc.about.fullName})` : res.host;
+        setStatus("connect-status", "ok", `Connected: ${label}`);
+        addLog("ok", `Connected to vCenter ${label}.`);
+        await loadVcSwitches();
+      } catch (e) {
+        vc.token = null;
+        setStatus("connect-status", "err", "Connect failed");
+        addLog("error", `vCenter connect failed: ${e.message}`);
+      } finally {
+        $("btn-vc-connect").disabled = false;
+      }
+    }
+
+    async function loadVcSwitches() {
+      const sel = $("vc-switch-select");
+      const refreshBtn = $("btn-vc-refresh-switches");
+      sel.disabled = true;
+      refreshBtn.disabled = !vc.token;
+      sel.innerHTML = '<option value="">-- loading --</option>';
+      if (!vc.token) {
+        sel.innerHTML = '<option value="">-- connect first --</option>';
+        return;
+      }
+      vc.switchKind = getVcSwitchKind();
+      try {
+        const res = await postJson("/api/target/vcenter/switches", {
+          target_token: vc.token,
+          switch_kind: vc.switchKind,
+        });
+        vc.switches = res.switches || [];
+        sel.innerHTML = "";
+        if (vc.switches.length === 0) {
+          sel.innerHTML = `<option value="">(no ${vc.switchKind.toUpperCase()} switches found)</option>`;
+          addLog("error", `No ${vc.switchKind.toUpperCase()} switches found on this vCenter.`);
+        } else {
+          const placeholder = document.createElement("option");
+          placeholder.value = "";
+          placeholder.textContent = `-- select a ${vc.switchKind.toUpperCase()} --`;
+          sel.appendChild(placeholder);
+          for (const s of vc.switches) {
+            const opt = document.createElement("option");
+            opt.value = s.name;
+            const hostHint = (s.hosts && s.hosts.length)
+              ? `  (${s.hosts.length} host${s.hosts.length === 1 ? "" : "s"})` : "";
+            opt.textContent = `${s.name}${hostHint}`;
+            sel.appendChild(opt);
+          }
+          sel.disabled = false;
+          addLog("info", `Loaded ${vc.switches.length} ${vc.switchKind.toUpperCase()} switch(es).`);
+        }
+      } catch (e) {
+        addLog("error", `vCenter switch list failed: ${e.message}`);
+        sel.innerHTML = '<option value="">(failed to load)</option>';
+      }
+      onVcSwitchChange();
+    }
+
+    function onVcSwitchChange() {
+      const kind = vc.switchKind;
+      const name = $("vc-switch-select").value;
+      const hostsRow = document.querySelector(".vc-vss-hosts");
+      if (hostsRow) hostsRow.style.display = kind === "vss" ? "" : "none";
+      if (kind === "vss" && name) {
+        loadVcHostsForVss(name);
+      } else {
+        vc.hostsForVss = [];
+        vc.selectedHosts.clear();
+        renderVcHostList();
+      }
+      loadVcPortGroups();
+      updateCreateButton();
+    }
+
+    async function loadVcHostsForVss(vswitchName) {
+      const wrap = $("vc-host-list");
+      wrap.innerHTML = '<div style="color: var(--muted); font-size: 12px;">Loading hosts...</div>';
+      try {
+        const res = await postJson("/api/target/vcenter/hosts", {
+          target_token: vc.token,
+          vswitch_name: vswitchName,
+        });
+        vc.hostsForVss = res.hosts || [];
+        vc.selectedHosts = new Set(vc.hostsForVss.map((h) => h.name));
+        renderVcHostList();
+      } catch (e) {
+        wrap.innerHTML = `<div style="color: var(--err); font-size: 12px;">Hosts failed: ${e.message}</div>`;
+      }
+    }
+
+    function renderVcHostList() {
+      const wrap = $("vc-host-list");
+      wrap.innerHTML = "";
+      if (!vc.hostsForVss.length) {
+        wrap.innerHTML = '<div style="color: var(--muted); font-size: 12px;">No hosts available.</div>';
+        return;
+      }
+      for (const h of vc.hostsForVss) {
+        const label = document.createElement("label");
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.value = h.name;
+        cb.checked = vc.selectedHosts.has(h.name);
+        cb.addEventListener("change", () => {
+          if (cb.checked) vc.selectedHosts.add(h.name);
+          else vc.selectedHosts.delete(h.name);
+          loadVcPortGroups();
+          updateCreateButton();
+        });
+        label.appendChild(cb);
+        label.appendChild(document.createTextNode(h.name));
+        wrap.appendChild(label);
+      }
+    }
+
+    async function loadVcPortGroups() {
+      const wrap = $("vc-pg-wrap");
+      const tbody = $("vc-pg-tbody");
+      const meta = $("vc-pg-meta");
+      const btn = $("btn-refresh-vc-pgs");
+      const name = $("vc-switch-select").value;
+      btn.disabled = !vc.token || !name;
+      if (!vc.token || !name) {
+        wrap.style.display = "none";
+        tbody.innerHTML = "";
+        meta.textContent = "—";
+        setStatus("vc-pg-status", null, "No data");
+        return;
+      }
+      setStatus("vc-pg-status", "busy", "Loading...");
+      try {
+        const res = await postJson("/api/target/vcenter/portgroups", {
+          target_token: vc.token,
+          switch_kind: vc.switchKind,
+          switch_name: name,
+          hosts: vc.switchKind === "vss" ? Array.from(vc.selectedHosts) : [],
+        });
+        const rows = res.rows || [];
+        tbody.innerHTML = "";
+        rows.forEach((r) => {
+          const tr = document.createElement("tr");
+          const tdName = document.createElement("td");
+          tdName.className = "col-name";
+          tdName.textContent = r.name || "(unnamed)";
+          tr.appendChild(tdName);
+
+          const tdVlan = document.createElement("td");
+          if (r.vlanKind === "trunk") {
+            const b = document.createElement("span");
+            b.className = "badge trunk"; b.textContent = "TRUNK";
+            tdVlan.appendChild(b);
+          } else if (r.vlanKind === "pvlan") {
+            const b = document.createElement("span");
+            b.className = "badge trunk"; b.textContent = `PVLAN ${r.vlan ?? ""}`;
+            tdVlan.appendChild(b);
+          } else if (r.vlan === null || r.vlan === undefined) {
+            tdVlan.textContent = "—";
+          } else {
+            tdVlan.textContent = r.vlan;
+          }
+          tr.appendChild(tdVlan);
+
+          const tdSwitch = document.createElement("td");
+          const sb = document.createElement("span");
+          sb.className = "badge " + (r.switchKind === "DVS" ? "dvs" : "vs");
+          sb.textContent = r.switchKind || "?";
+          tdSwitch.appendChild(sb);
+          tdSwitch.appendChild(document.createTextNode(" " + (r.switchName || "")));
+          tr.appendChild(tdSwitch);
+
+          const tdHosts = document.createElement("td");
+          tdHosts.className = "uplinks";
+          if (vc.switchKind === "vss") {
+            const hosts = r.hosts || [];
+            tdHosts.textContent = hosts.length
+              ? `${hosts.length} host(s): ${hosts.join(", ")}`
+              : "—";
+          } else {
+            tdHosts.textContent = "(DVS-wide)";
+          }
+          tr.appendChild(tdHosts);
+
+          tbody.appendChild(tr);
+        });
+        wrap.style.display = rows.length ? "" : "none";
+        meta.textContent = rows.length
+          ? `${rows.length} port group(s) on this switch.`
+          : "No port groups on this switch yet.";
+        setStatus("vc-pg-status", "ok", `${rows.length} port group(s)`);
+      } catch (e) {
+        setStatus("vc-pg-status", "err", "Refresh failed");
+        addLog("error", `Existing-portgroups refresh failed: ${e.message}`);
+      }
+    }
+
+    function updateVcCreateButton() {
+      const switchName = $("vc-switch-select").value;
+      const kind = vc.switchKind;
+      const hostsOk = kind !== "vss" || vc.selectedHosts.size > 0;
+      const ok =
+        !!vc.token &&
+        !!switchName &&
+        hostsOk &&
+        state.parsed.networks.length > 0;
+      $("btn-create").disabled = !ok;
+    }
+
+    async function doVcCreate() {
+      const switchName = $("vc-switch-select").value;
+      const kind = vc.switchKind;
+      if (!vc.token || !switchName || state.parsed.networks.length === 0) return;
+      if (kind === "vss" && vc.selectedHosts.size === 0) return;
+      $("btn-create").disabled = true;
+      setStatus("create-status", "busy", "Creating...");
+      addLog("system",
+        `Submitting ${state.parsed.networks.length} port group(s) to ` +
+        `${kind.toUpperCase()} '${switchName}'.`);
+      let resp;
+      try {
+        resp = await fetch("/api/target/vcenter/create", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            target_token: vc.token,
+            switch_kind: kind,
+            switch_name: switchName,
+            hosts: kind === "vss" ? Array.from(vc.selectedHosts) : [],
+            networks: state.parsed.networks,
+            pg_type: "earlyBinding",
+            num_ports: 8,
+          }),
+        });
+      } catch (e) {
+        addLog("error", `Request failed: ${e.message}`);
+        setStatus("create-status", "err", "Failed");
+        $("btn-create").disabled = false;
+        return;
+      }
+      if (!resp.ok) {
+        let errMsg = "HTTP " + resp.status;
+        try {
+          const j = await resp.json();
+          if (j && j.error) errMsg = j.error;
+        } catch (_) {}
+        addLog("error", `Server rejected request: ${errMsg}`);
+        setStatus("create-status", "err", "Failed");
+        $("btn-create").disabled = false;
+        return;
+      }
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      let okCount = 0;
+      let failCount = 0;
+      while (true) {
+        let chunk;
+        try {
+          chunk = await reader.read();
+        } catch (e) {
+          addLog("error", `Stream read error: ${e.message}`);
+          break;
+        }
+        if (chunk.done) break;
+        buf += decoder.decode(chunk.value, { stream: true });
+        let idx;
+        while ((idx = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, idx);
+          buf = buf.slice(idx + 1);
+          if (!line.trim()) continue;
+          let evt;
+          try { evt = JSON.parse(line); } catch (_) { continue; }
+          addLog(evt.level || "info", evt.msg || "");
+          if (evt.level === "ok") okCount++;
+          else if (evt.level === "error") failCount++;
+        }
+      }
+      if (failCount > 0) {
+        setStatus("create-status", "err", `Done with ${failCount} error(s)`);
+      } else {
+        setStatus("create-status", "ok", `Done (${okCount} created)`);
+      }
+      $("btn-create").disabled = false;
+      updateCreateButton();
+      loadVcPortGroups();
+    }
+
     document.addEventListener("DOMContentLoaded", () => {
       $("btn-connect").addEventListener("click", doConnect);
       $("pc-pass").addEventListener("keydown", (e) => {
@@ -1391,6 +1896,37 @@ network_VLAN_1003 1003"></textarea>
       $("btn-src-select-all").addEventListener("click", selectAllVisible);
       $("btn-src-clear").addEventListener("click", clearSelection);
       $("btn-src-import").addEventListener("click", importSelectedToTextarea);
+
+      document.querySelectorAll('input[name="target-platform"]').forEach((el) => {
+        el.addEventListener("change", applyPlatformVisibility);
+      });
+      applyPlatformVisibility();
+
+      $("btn-vc-connect").addEventListener("click", doVcConnect);
+      $("vc-pass").addEventListener("keydown", (e) => {
+        if (e.key === "Enter") doVcConnect();
+      });
+      document.querySelectorAll('input[name="vc-switch-kind"]').forEach((el) => {
+        el.addEventListener("change", () => {
+          vc.switchKind = getVcSwitchKind();
+          loadVcSwitches();
+        });
+      });
+      $("vc-switch-select").addEventListener("change", onVcSwitchChange);
+      $("btn-vc-refresh-switches").addEventListener("click", loadVcSwitches);
+      $("btn-refresh-vc-pgs").addEventListener("click", loadVcPortGroups);
+      $("btn-vc-hosts-all").addEventListener("click", () => {
+        vc.selectedHosts = new Set(vc.hostsForVss.map((h) => h.name));
+        renderVcHostList();
+        loadVcPortGroups();
+        updateCreateButton();
+      });
+      $("btn-vc-hosts-none").addEventListener("click", () => {
+        vc.selectedHosts.clear();
+        renderVcHostList();
+        loadVcPortGroups();
+        updateCreateButton();
+      });
 
       parseNetworks();
     });
