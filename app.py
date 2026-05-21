@@ -56,7 +56,7 @@ from flask import (
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 __version__ = "0.2.0"
-BUILD = 11   # bump on every commit
+BUILD = 12   # bump on every commit
 
 app = Flask(__name__)
 
@@ -245,7 +245,12 @@ def api_version():
 # GitHub on every page load. The UI polls /api/check-update on load and at
 # most once every few minutes after that.
 _UPDATE_CHECK_CACHE: dict[str, Any] = {"at": 0.0, "result": None}
-_UPDATE_CHECK_TTL = 300  # 5 minutes
+# Kept short on purpose: raw.githubusercontent.com is fronted by Fastly with
+# max-age=300, so even when *we* hold a result we want to re-check often
+# enough that an upstream push shows up in the UI within ~1 minute. The
+# fetch itself also adds a cache-buster query string + Cache-Control:
+# no-cache header to defeat the CDN edge.
+_UPDATE_CHECK_TTL = 60  # seconds
 _UPSTREAM_APP_PY_URL = (
     "https://raw.githubusercontent.com/script-repo/ntnx-np4m/main/app.py"
 )
@@ -274,37 +279,49 @@ def api_check_update():
     """
     force = request.args.get("force", "").lower() in {"1", "true", "yes"}
     now = time.time()
+
+    def _resp(payload: dict[str, Any], status: int = 200) -> Response:
+        # Browsers/proxies must never cache this JSON: a stale "up to date"
+        # answer would freeze the green pill until a hard refresh.
+        r = make_response(jsonify(payload), status)
+        r.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        r.headers["Pragma"] = "no-cache"
+        return r
+
     if (
         not force
         and _UPDATE_CHECK_CACHE["result"] is not None
         and now - _UPDATE_CHECK_CACHE["at"] < _UPDATE_CHECK_TTL
     ):
-        return jsonify(_UPDATE_CHECK_CACHE["result"])
+        return _resp(_UPDATE_CHECK_CACHE["result"])
 
+    # Cache-bust the CDN: raw.githubusercontent.com is served by Fastly
+    # with max-age=300, so without this we can read a 5-minute-stale blob
+    # right after a push. The query param changes the Fastly cache key
+    # for the request, and the no-cache header asks the edge to revalidate.
+    fetch_url = f"{_UPSTREAM_APP_PY_URL}?nocache={int(now)}"
     try:
-        r = requests.get(_UPSTREAM_APP_PY_URL, timeout=8)
+        r = requests.get(
+            fetch_url,
+            timeout=8,
+            headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
+        )
     except requests.RequestException as exc:
-        return (
-            jsonify(
-                local=BUILD,
-                remote=None,
-                update_available=False,
-                error=f"upstream fetch failed: {exc}",
-                repo_url=_UPSTREAM_RELEASES_URL,
-            ),
-            200,
-        )
+        return _resp({
+            "local": BUILD,
+            "remote": None,
+            "update_available": False,
+            "error": f"upstream fetch failed: {exc}",
+            "repo_url": _UPSTREAM_RELEASES_URL,
+        })
     if r.status_code >= 400:
-        return (
-            jsonify(
-                local=BUILD,
-                remote=None,
-                update_available=False,
-                error=f"upstream HTTP {r.status_code}",
-                repo_url=_UPSTREAM_RELEASES_URL,
-            ),
-            200,
-        )
+        return _resp({
+            "local": BUILD,
+            "remote": None,
+            "update_available": False,
+            "error": f"upstream HTTP {r.status_code}",
+            "repo_url": _UPSTREAM_RELEASES_URL,
+        })
     remote_build = _parse_remote_build(r.text)
     result = {
         "local": BUILD,
@@ -317,7 +334,7 @@ def api_check_update():
     }
     _UPDATE_CHECK_CACHE["at"] = now
     _UPDATE_CHECK_CACHE["result"] = result
-    return jsonify(result)
+    return _resp(result)
 
 
 # ---------------------------------------------------------------------------
