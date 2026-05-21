@@ -56,7 +56,7 @@ from flask import (
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 __version__ = "0.2.0"
-BUILD = 12   # bump on every commit
+BUILD = 13   # bump on every commit
 
 app = Flask(__name__)
 
@@ -245,16 +245,23 @@ def api_version():
 # GitHub on every page load. The UI polls /api/check-update on load and at
 # most once every few minutes after that.
 _UPDATE_CHECK_CACHE: dict[str, Any] = {"at": 0.0, "result": None}
-# Kept short on purpose: raw.githubusercontent.com is fronted by Fastly with
-# max-age=300, so even when *we* hold a result we want to re-check often
-# enough that an upstream push shows up in the UI within ~1 minute. The
-# fetch itself also adds a cache-buster query string + Cache-Control:
-# no-cache header to defeat the CDN edge.
+# Kept short on purpose so an upstream push shows up in the UI within
+# ~1 minute. The primary fetch goes through the GitHub Contents API
+# (which is *not* Fastly-fronted with a 5-minute TTL like raw.github-
+# usercontent.com is), so 60 lookups/hour from one server is well
+# inside the anonymous rate limit of 60/hr per IP. If we ever do hit
+# the limit, the raw URL is used as a fallback.
 _UPDATE_CHECK_TTL = 60  # seconds
-_UPSTREAM_APP_PY_URL = (
-    "https://raw.githubusercontent.com/script-repo/ntnx-np4m/main/app.py"
+_UPSTREAM_OWNER_REPO = "script-repo/ntnx-np4m"
+_UPSTREAM_BRANCH = "main"
+_UPSTREAM_CONTENTS_API = (
+    f"https://api.github.com/repos/{_UPSTREAM_OWNER_REPO}/contents/app.py"
+    f"?ref={_UPSTREAM_BRANCH}"
 )
-_UPSTREAM_RELEASES_URL = "https://github.com/script-repo/ntnx-np4m"
+_UPSTREAM_APP_PY_URL = (
+    f"https://raw.githubusercontent.com/{_UPSTREAM_OWNER_REPO}/{_UPSTREAM_BRANCH}/app.py"
+)
+_UPSTREAM_RELEASES_URL = f"https://github.com/{_UPSTREAM_OWNER_REPO}"
 
 
 def _parse_remote_build(text: str) -> int | None:
@@ -268,6 +275,60 @@ def _parse_remote_build(text: str) -> int | None:
         return int(m.group(1))
     except ValueError:
         return None
+
+
+def _fetch_upstream_app_py() -> tuple[str | None, str | None]:
+    """Fetch upstream app.py text. Returns (text, error_message).
+
+    Primary path: GitHub Contents API (returns base64 + commit sha; not
+    fronted by the 5-minute Fastly cache that raw.githubusercontent.com
+    sits behind, so a push shows up immediately).
+    Fallback: raw URL with a cache-buster query param (best-effort; the
+    edge cache may still win, but at least we tried).
+    """
+    import base64
+
+    try:
+        r = requests.get(
+            _UPSTREAM_CONTENTS_API,
+            timeout=8,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+                "User-Agent": "ntnx-np4m-update-check",
+            },
+        )
+    except requests.RequestException as exc:
+        contents_err = f"contents API: {exc}"
+        r = None
+    else:
+        contents_err = None
+    if r is not None and r.status_code == 200:
+        try:
+            j = r.json()
+            blob = j.get("content", "")
+            if isinstance(blob, str) and blob:
+                txt = base64.b64decode(blob).decode("utf-8", errors="replace")
+                return txt, None
+            return None, "contents API returned no content"
+        except Exception as exc:  # noqa: BLE001
+            contents_err = f"contents API parse: {exc}"
+    elif r is not None:
+        contents_err = f"contents API HTTP {r.status_code}"
+
+    # Fallback to the raw URL. Add a cache-bust query string; Fastly often
+    # ignores this for github raw content but it costs nothing to try.
+    try:
+        r2 = requests.get(
+            f"{_UPSTREAM_APP_PY_URL}?nocache={int(time.time())}",
+            timeout=8,
+            headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
+        )
+    except requests.RequestException as exc:
+        return None, f"{contents_err}; raw fallback: {exc}"
+    if r2.status_code >= 400:
+        return None, f"{contents_err}; raw HTTP {r2.status_code}"
+    return r2.text, None
 
 
 @app.get("/api/check-update")
@@ -295,34 +356,16 @@ def api_check_update():
     ):
         return _resp(_UPDATE_CHECK_CACHE["result"])
 
-    # Cache-bust the CDN: raw.githubusercontent.com is served by Fastly
-    # with max-age=300, so without this we can read a 5-minute-stale blob
-    # right after a push. The query param changes the Fastly cache key
-    # for the request, and the no-cache header asks the edge to revalidate.
-    fetch_url = f"{_UPSTREAM_APP_PY_URL}?nocache={int(now)}"
-    try:
-        r = requests.get(
-            fetch_url,
-            timeout=8,
-            headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
-        )
-    except requests.RequestException as exc:
+    text, err = _fetch_upstream_app_py()
+    if text is None:
         return _resp({
             "local": BUILD,
             "remote": None,
             "update_available": False,
-            "error": f"upstream fetch failed: {exc}",
+            "error": err or "upstream fetch failed",
             "repo_url": _UPSTREAM_RELEASES_URL,
         })
-    if r.status_code >= 400:
-        return _resp({
-            "local": BUILD,
-            "remote": None,
-            "update_available": False,
-            "error": f"upstream HTTP {r.status_code}",
-            "repo_url": _UPSTREAM_RELEASES_URL,
-        })
-    remote_build = _parse_remote_build(r.text)
+    remote_build = _parse_remote_build(text)
     result = {
         "local": BUILD,
         "remote": remote_build,
