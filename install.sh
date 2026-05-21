@@ -344,14 +344,26 @@ if [[ "$NP4M_SYSTEMD" == "yes" && "$HAS_SYSTEMD" == "yes" ]]; then
   # session credentials in in-process dicts (TARGET_VCENTER_SESSIONS,
   # SOURCE_SESSIONS, SESSIONS), so running multiple worker *processes*
   # would scatter tokens across them - the very next request after
-  # /connect would hit a different worker and 401 with "not connected
-  # to a target vCenter". The app's hot paths are I/O-bound (waiting on
-  # vCenter / Prism Central), so threads give plenty of concurrency.
+  # /connect would hit a different worker and 401 with "session not
+  # found". The app's hot paths are I/O-bound (waiting on vCenter /
+  # Prism Central), so threads give plenty of concurrency.
+  #
+  # Restart=always (not on-failure) is what makes the in-app self-update
+  # button work: /api/self-update SIGTERMs the gunicorn master after
+  # running git pull + pip install, and systemd brings it right back
+  # with the new code. on-failure would treat a clean SIGTERM as a
+  # normal shutdown and *not* restart, leaving the service down.
+  #
+  # --timeout 300 covers the streaming self-update and the streaming
+  # /api/create endpoints (PC task polling can take 60+ seconds without
+  # producing output during a slow create batch).
   cat > /etc/systemd/system/np4m.service <<EOF
 [Unit]
 Description=NP4M
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -359,9 +371,11 @@ User=${NP4M_USER}
 WorkingDirectory=${NP4M_DIR}
 Environment=WEB_HOST=${NP4M_BIND}
 Environment=WEB_PORT=${NP4M_PORT}
-ExecStart=${NP4M_DIR}/.venv/bin/gunicorn --workers 1 --threads 4 --bind ${NP4M_BIND}:${NP4M_PORT} ${TLS_ARGS} app:app
-Restart=on-failure
-RestartSec=3
+ExecStart=${NP4M_DIR}/.venv/bin/gunicorn --workers 1 --threads 4 --timeout 300 --graceful-timeout 30 --bind ${NP4M_BIND}:${NP4M_PORT} ${TLS_ARGS} app:app
+Restart=always
+RestartSec=2
+KillSignal=SIGTERM
+TimeoutStopSec=30
 
 [Install]
 WantedBy=multi-user.target
@@ -372,8 +386,9 @@ EOF
 elif [[ "$NP4M_SYSTEMD" == "yes" && "$HAS_SYSTEMD" == "no" ]]; then
   warn "systemd not detected on this distro. NP4M was installed but no service was registered."
   warn "Start it manually with:"
-  warn "  sudo -u ${NP4M_USER} ${NP4M_DIR}/.venv/bin/gunicorn --workers 1 --threads 4 \\"
+  warn "  sudo -u ${NP4M_USER} ${NP4M_DIR}/.venv/bin/gunicorn --workers 1 --threads 4 --timeout 300 \\"
   warn "    --bind ${NP4M_BIND}:${NP4M_PORT} ${TLS_ARGS} app:app"
+  warn "Note: the in-app self-update button requires systemd Restart=always; skip it here."
 fi
 
 # --- 12. Summary -----------------------------------------------------------

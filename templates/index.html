@@ -101,6 +101,20 @@
       background: #10b981;
       box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.25);
     }
+    .update-btn[data-state="updating"] {
+      background: #1e3a5f;
+      color: #bfdbfe;
+      border-color: #3b82f6;
+      cursor: progress;
+    }
+    .update-btn[data-state="updating"] .dot {
+      background: #3b82f6;
+      animation: np4m-pulse 1.2s ease-in-out infinite;
+    }
+    @keyframes np4m-pulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.7); }
+      50%      { box-shadow: 0 0 0 5px rgba(59, 130, 246, 0); }
+    }
     .update-btn[data-state="error"] {
       background: #3a1e1e; color: #fecaca; border-color: #7f1d1d;
     }
@@ -2130,6 +2144,17 @@ network_VLAN_1003 1003"></textarea>
       const btn = $("update-btn");
       if (!btn) return;
       const labelEl = btn.querySelector(".label");
+
+      // Track our cached repo URL (from /api/check-update) and the
+      // remote build number so the click handler can decide between
+      // "trigger in-app update" and "fall back to opening the repo".
+      const ui = {
+        localBuild: null,
+        remoteBuild: null,
+        repoUrl: "https://github.com/script-repo/ntnx-np4m",
+        updating: false,
+      };
+
       const setState = (state, label, title, href) => {
         btn.dataset.state = state;
         if (labelEl) labelEl.textContent = label;
@@ -2151,47 +2176,188 @@ network_VLAN_1003 1003"></textarea>
           const r = await fetch(url, { headers: { Accept: "application/json" } });
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
           const j = await r.json();
+          ui.localBuild = j.local ?? null;
+          ui.remoteBuild = j.remote ?? null;
+          if (j.repo_url) ui.repoUrl = j.repo_url;
           if (j.error) {
-            setState(
-              "error",
-              "Update check failed",
-              j.error,
-              j.repo_url || null,
-            );
+            setState("error", "Update check failed", j.error, ui.repoUrl);
             return;
           }
-          const local = j.local;
-          const remote = j.remote;
-          if (j.update_available && remote != null) {
+          if (j.update_available && j.remote != null) {
             setState(
               "available",
-              `Update available (build ${remote})`,
-              `Local build ${local}, upstream build ${remote}. Click to open the repo.`,
-              j.repo_url || "https://github.com/script-repo/ntnx-np4m",
+              `Update available (build ${j.remote})`,
+              `Local build ${j.local}, upstream build ${j.remote}. Click to install in place.`,
+              null,  // click is handled in JS; we don't want the link nav
             );
-          } else if (remote != null) {
+          } else if (j.remote != null) {
             setState(
               "uptodate",
-              `Up to date (build ${local})`,
-              `Local build ${local} matches upstream.`,
+              `Up to date (build ${j.local})`,
+              `Local build ${j.local} matches upstream.`,
               null,
             );
           } else {
-            setState(
-              "error",
-              "Update check unavailable",
-              "Couldn't parse upstream build number.",
-              j.repo_url || null,
-            );
+            setState("error", "Update check unavailable",
+              "Couldn't parse upstream build number.", ui.repoUrl);
           }
         } catch (e) {
-          setState("error", "Update check failed", String(e), null);
+          setState("error", "Update check failed", String(e), ui.repoUrl);
         }
       }
 
+      async function waitForRestart() {
+        // After the master is told to exit, poll /api/version on a fast
+        // cadence for up to ~60s. Once we see a build *different from
+        // the one we started with* (i.e. the freshly pulled build),
+        // hard-reload the page so the user sees the new UI.
+        const startBuild = ui.localBuild;
+        const deadline = Date.now() + 60_000;
+        let everSawDown = false;
+        while (Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 1500));
+          try {
+            const r = await fetch("/api/version", {
+              cache: "no-store",
+              headers: { Accept: "application/json" },
+            });
+            if (!r.ok) { everSawDown = true; continue; }
+            const j = await r.json();
+            if (everSawDown && j && j.build != null && j.build !== startBuild) {
+              addLog("ok", `Service back online at build ${j.build}. Reloading...`);
+              setTimeout(() => window.location.reload(), 600);
+              return;
+            }
+            // We can also exit the polling loop the moment the build number
+            // bumps even if we never observed a downtime (very fast restart).
+            if (j && j.build != null && startBuild != null && j.build !== startBuild) {
+              addLog("ok", `Service updated to build ${j.build}. Reloading...`);
+              setTimeout(() => window.location.reload(), 600);
+              return;
+            }
+          } catch (_) {
+            everSawDown = true;
+          }
+        }
+        addLog("warn", "Timed out waiting for service to come back. Try a hard refresh.");
+        setState("error", "Restart timeout",
+          "Service didn't come back within 60s. Try reloading the page.",
+          ui.repoUrl);
+      }
+
+      async function doSelfUpdate() {
+        if (ui.updating) return;
+        ui.updating = true;
+        const prevState = btn.dataset.state;
+        const prevLabel = labelEl ? labelEl.textContent : "";
+        setState("updating", "Updating...",
+          "Pulling new code and restarting the service.", null);
+
+        let resp;
+        try {
+          resp = await fetch("/api/self-update", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+          });
+        } catch (e) {
+          addLog("error", `Update request failed: ${e.message}`);
+          ui.updating = false;
+          setState(prevState || "error", prevLabel || "Update failed",
+            "Could not reach the server.", ui.repoUrl);
+          return;
+        }
+        if (!resp.ok || !resp.body) {
+          addLog("error", `Update endpoint returned HTTP ${resp.status}.`);
+          ui.updating = false;
+          setState("error", "Update failed",
+            `Server returned HTTP ${resp.status}.`, ui.repoUrl);
+          return;
+        }
+
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = "";
+        let restarting = false;
+        let preflightFailed = null;
+        let aborted = false;
+
+        while (true) {
+          let chunk;
+          try { chunk = await reader.read(); }
+          catch (e) {
+            // A SIGTERM mid-stream is *expected* once we hit "restarting".
+            if (restarting) break;
+            addLog("error", `Update stream read error: ${e.message}`);
+            break;
+          }
+          if (chunk.done) break;
+          buf += decoder.decode(chunk.value, { stream: true });
+          let idx;
+          while ((idx = buf.indexOf("\n")) >= 0) {
+            const line = buf.slice(0, idx);
+            buf = buf.slice(idx + 1);
+            if (!line.trim()) continue;
+            let evt;
+            try { evt = JSON.parse(line); } catch (_) { continue; }
+            addLog(evt.level || "info", evt.msg || "");
+            if (evt.event === "preflight_failed") {
+              preflightFailed = evt;
+            } else if (evt.event === "restarting") {
+              restarting = true;
+            } else if (evt.event === "aborted") {
+              aborted = true;
+            }
+          }
+        }
+
+        if (preflightFailed) {
+          // Auto-update isn't available here (Windows, dev run, missing
+          // Restart=always, etc.). Fall back to the linked repo so the
+          // user has a clear next step.
+          ui.updating = false;
+          setState("available",
+            `Update available (build ${ui.remoteBuild ?? "?"})`,
+            "Auto-update unavailable on this deploy; opens the repo instead.",
+            preflightFailed.repo_url || ui.repoUrl);
+          // One-shot: open the repo so the click feels useful.
+          window.open(preflightFailed.repo_url || ui.repoUrl, "_blank", "noopener");
+          return;
+        }
+        if (aborted) {
+          ui.updating = false;
+          setState("error", "Update aborted",
+            "See the log for the failing step.", ui.repoUrl);
+          return;
+        }
+        if (restarting) {
+          addLog("system", "Waiting for the service to come back...");
+          await waitForRestart();
+          ui.updating = false;
+          return;
+        }
+        // Stream ended without an explicit event: treat as failure but
+        // don't strand the button.
+        ui.updating = false;
+        setState("error", "Update incomplete",
+          "Server stopped streaming before restart.", ui.repoUrl);
+      }
+
+      btn.addEventListener("click", (e) => {
+        // Only block default nav when we're going to take action ourselves.
+        const st = btn.dataset.state;
+        if (st === "available") {
+          e.preventDefault();
+          doSelfUpdate();
+        } else if (st === "updating") {
+          e.preventDefault();
+        }
+        // "uptodate" / "loading" / "error" with href fall through to the
+        // native link behavior.
+      });
+
       setState("loading", "Checking...", "Checking for updates...", null);
       check(false);
-      setInterval(() => check(false), 5 * 60 * 1000);
+      setInterval(() => { if (!ui.updating) check(false); }, 5 * 60 * 1000);
     }
   </script>
 </body>

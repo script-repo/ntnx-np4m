@@ -189,6 +189,31 @@ systemctl restart np4m
 journalctl -u np4m -f
 ```
 
+#### In-app self-update
+
+The header pill in the UI checks `raw.githubusercontent.com/.../app.py` for
+the upstream `BUILD` number every 5 minutes. When upstream is ahead, the
+pill turns green and reads "Update available (build N)". Click it to
+update in place — NP4M streams the steps into the log pane:
+
+1. `git fetch origin --prune` (`git reset --hard origin/main` lands the new code)
+2. `pip install --upgrade -r requirements.txt`
+3. SIGTERM the gunicorn master so systemd respawns it with the new code
+
+The page then polls `/api/version` for up to 60 seconds, detects the new
+build, and hard-reloads itself. This only works under the systemd
+deployment created by `install.sh`. Other setups (Windows, `python app.py`
+dev runs, missing `Restart=always`, etc.) get a clean preflight refusal
+and the pill falls back to opening the upstream repo for a manual
+update — no harm done.
+
+> **Why `Restart=always` matters:** `/api/self-update` SIGTERMs the
+> gunicorn master after the pull/install steps. With `Restart=on-failure`
+> systemd would treat that clean exit as "stopped on purpose" and leave
+> the service down. The unit shipped by `install.sh` uses `Restart=always`
+> + `StartLimitBurst=5` (rate-limited so a crash loop doesn't spin
+> forever).
+
 ### Run on Windows (one command, self-contained)
 
 No admin, no service, no persistence, nothing outside the folder you run it

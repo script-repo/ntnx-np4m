@@ -28,8 +28,14 @@ from __future__ import annotations
 
 import json
 import os
+import pathlib
 import re
 import secrets
+import shutil
+import signal
+import subprocess
+import sys
+import threading
 import time
 import urllib.parse
 import uuid
@@ -50,7 +56,7 @@ from flask import (
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 __version__ = "0.2.0"
-BUILD = 9   # bump on every commit
+BUILD = 10   # bump on every commit
 
 app = Flask(__name__)
 
@@ -312,6 +318,204 @@ def api_check_update():
     _UPDATE_CHECK_CACHE["at"] = now
     _UPDATE_CHECK_CACHE["result"] = result
     return jsonify(result)
+
+
+# ---------------------------------------------------------------------------
+# Self-update: pull the latest source + Python deps, then ask systemd to
+# restart us so the new code is loaded. Only enabled when we're running
+# the install.sh deployment (Linux + gunicorn + systemd + Restart=always);
+# refuses cleanly otherwise so Windows / dev runs don't accidentally try.
+# ---------------------------------------------------------------------------
+
+
+def _under_gunicorn() -> bool:
+    """True if our parent process is gunicorn (so SIGTERM->parent triggers
+    a systemd-managed restart of the master)."""
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        with open(f"/proc/{os.getppid()}/comm", "r", encoding="utf-8") as f:
+            return "gunicorn" in f.read().lower()
+    except Exception:
+        return False
+
+
+def _systemd_restart_mode() -> str | None:
+    """Return the Restart= value of np4m.service (e.g. 'always'), or None
+    if systemd isn't available or the unit isn't ours."""
+    if not sys.platform.startswith("linux"):
+        return None
+    if not shutil.which("systemctl"):
+        return None
+    try:
+        r = subprocess.run(
+            ["systemctl", "show", "np4m", "-p", "Restart", "--value"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0:
+            return (r.stdout or "").strip().lower() or None
+    except Exception:
+        pass
+    return None
+
+
+def _self_update_preflight() -> tuple[bool, str | None, dict[str, Any]]:
+    """Return (ok, error_message, info_dict) describing whether the running
+    deployment can update itself in place."""
+    repo_dir = pathlib.Path(__file__).resolve().parent
+    venv_pip_unix = repo_dir / ".venv" / "bin" / "pip"
+    venv_pip_win = repo_dir / ".venv" / "Scripts" / "pip.exe"
+    venv_pip = venv_pip_unix if venv_pip_unix.exists() else venv_pip_win
+    restart_mode = _systemd_restart_mode()
+    info: dict[str, Any] = {
+        "platform": sys.platform,
+        "repo_dir": str(repo_dir),
+        "venv_pip": str(venv_pip) if venv_pip.exists() else None,
+        "under_systemd": bool(os.environ.get("INVOCATION_ID")),
+        "under_gunicorn": _under_gunicorn(),
+        "systemd_restart": restart_mode,
+        "git_dir": str(repo_dir / ".git") if (repo_dir / ".git").exists() else None,
+    }
+
+    if not sys.platform.startswith("linux"):
+        return False, (
+            "Auto-update is only wired up for Linux/systemd deployments. "
+            "Use the upstream repo link to update manually."
+        ), info
+    if not info["under_gunicorn"]:
+        return False, (
+            "NP4M is not running under gunicorn; auto-update requires the "
+            "install.sh deployment (use the link to update manually)."
+        ), info
+    if not info["under_systemd"]:
+        return False, (
+            "NP4M is not running under systemd; auto-update needs the "
+            "systemd unit from install.sh."
+        ), info
+    if not info["git_dir"]:
+        return False, (
+            f"{repo_dir} is not a git checkout; auto-update needs `git pull`."
+        ), info
+    if not info["venv_pip"]:
+        return False, (
+            f"venv pip not found under {repo_dir}/.venv; reinstall via "
+            "install.sh and try again."
+        ), info
+    if restart_mode != "always":
+        return False, (
+            f"systemd unit has Restart={restart_mode!r}; auto-update needs "
+            "Restart=always so the service comes back after SIGTERM. Re-run "
+            "the install.sh one-liner to refresh the unit."
+        ), info
+    return True, None, info
+
+
+@app.get("/api/self-update/preflight")
+def api_self_update_preflight():
+    ok, err, info = _self_update_preflight()
+    return jsonify(ok=ok, error=err, info=info, repo_url=_UPSTREAM_RELEASES_URL)
+
+
+def _schedule_master_sigterm(delay: float = 2.0) -> None:
+    """Send SIGTERM to our parent (the gunicorn master) after `delay`s.
+    With Restart=always in the systemd unit, systemd will respawn it with
+    the freshly-pulled code."""
+    def _kick():
+        time.sleep(delay)
+        try:
+            os.kill(os.getppid(), signal.SIGTERM)
+        except Exception:
+            pass
+    threading.Thread(target=_kick, daemon=True).start()
+
+
+@app.post("/api/self-update")
+def api_self_update():
+    """Stream NDJSON: preflight, git fetch+reset, pip install, restart.
+
+    Returns an NDJSON stream so the UI can show progress in the log pane.
+    Each line is a small object: {"level": "...", "msg": "...", ...}.
+    Sends an "event": "preflight_failed" or "event": "restarting" marker
+    line at the relevant transition so the front-end can branch on it.
+    """
+    ok, err, info = _self_update_preflight()
+
+    def ndjson(obj: dict[str, Any]) -> str:
+        return json.dumps(obj) + "\n"
+
+    if not ok:
+        # Single-line failure stream so the frontend handler is uniform.
+        def fail_gen():
+            yield ndjson({
+                "level": "error",
+                "msg": err or "auto-update unavailable",
+                "event": "preflight_failed",
+                "info": info,
+                "repo_url": _UPSTREAM_RELEASES_URL,
+            })
+        return Response(
+            stream_with_context(fail_gen()),
+            mimetype="application/x-ndjson",
+        )
+
+    repo_dir = pathlib.Path(info["repo_dir"])
+    venv_pip = pathlib.Path(info["venv_pip"])
+
+    def generate():
+        yield ndjson({"level": "system", "msg": f"NP4M auto-update starting (local build {BUILD})."})
+        yield ndjson({"level": "info", "msg": f"  repo:    {repo_dir}"})
+        yield ndjson({"level": "info", "msg": f"  venv:    {venv_pip.parent.parent}"})
+
+        steps: list[tuple[str, list[str]]] = [
+            ("git fetch origin",                ["git", "fetch", "origin", "--prune"]),
+            ("git reset --hard origin/main",    ["git", "reset", "--hard", "origin/main"]),
+            (
+                "pip install -r requirements.txt",
+                [str(venv_pip), "install", "--upgrade", "--disable-pip-version-check",
+                 "-r", str(repo_dir / "requirements.txt")],
+            ),
+        ]
+        for desc, cmd in steps:
+            yield ndjson({"level": "system", "msg": f"$ {desc}"})
+            try:
+                proc = subprocess.Popen(
+                    cmd, cwd=str(repo_dir),
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, bufsize=1,
+                )
+            except Exception as exc:
+                yield ndjson({"level": "error", "msg": f"  failed to start: {exc}"})
+                yield ndjson({"level": "error", "msg": "Update aborted.", "event": "aborted"})
+                return
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                line = line.rstrip()
+                if line:
+                    yield ndjson({"level": "info", "msg": f"  {line}"})
+            try:
+                rc = proc.wait(timeout=240)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                yield ndjson({"level": "error", "msg": "  step timed out after 240s"})
+                yield ndjson({"level": "error", "msg": "Update aborted.", "event": "aborted"})
+                return
+            if rc != 0:
+                yield ndjson({"level": "error", "msg": f"  exit code {rc}; aborting"})
+                yield ndjson({"level": "error", "msg": "Update aborted.", "event": "aborted"})
+                return
+            yield ndjson({"level": "ok", "msg": f"  {desc}: done"})
+
+        yield ndjson({
+            "level": "ok",
+            "msg": "Update applied. Restarting service in ~2s...",
+            "event": "restarting",
+        })
+        _schedule_master_sigterm(2.0)
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="application/x-ndjson",
+    )
 
 
 def _auth_from_body(body: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
