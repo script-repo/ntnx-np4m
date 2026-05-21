@@ -107,9 +107,22 @@ running app; the one-command installers just save you the manual steps.
 
 ### Install on Linux (one command)
 
-For RHEL 9, Rocky 9, AlmaLinux 9, Oracle Linux 9. Needs root because it
-installs system packages, a service user, and a systemd unit. Re-running it
-upgrades NP4M in place (`git pull` + `pip install -U`).
+Works on any modern Linux distro: the installer detects the family from
+`/etc/os-release` and dispatches to the right package manager. Needs root
+because it installs system packages, a service user, and (where systemd is
+available) a service unit. Re-running it upgrades NP4M in place
+(`git pull` + `pip install -U`).
+
+| Family                                                          | Package manager | Notes                                                                                  |
+|-----------------------------------------------------------------|-----------------|----------------------------------------------------------------------------------------|
+| Debian, Ubuntu, Mint, Pop!_OS, elementary, Kali, Raspbian       | `apt-get`       | Installs `python3*-venv` automatically.                                                |
+| RHEL, Rocky, Alma, Oracle Linux, Fedora, CentOS Stream, Amazon  | `dnf` (`yum`)   | On unsubscribed RHEL 8/9, drops a UBI repo so `dnf` still works.                       |
+| openSUSE Leap, openSUSE Tumbleweed, SUSE Linux Enterprise       | `zypper`        | Prefers `python312` / `python311`, falls back to `python3`.                            |
+| Arch, Manjaro, EndeavourOS, Garuda, CachyOS                     | `pacman`        | Uses the rolling `python` package.                                                     |
+| Alpine                                                          | `apk`           | No systemd by default; the installer prints the manual `gunicorn` start command. |
+
+If your distro isn't in the list above, set `NP4M_PY=/path/to/python3` (3.10+
+with the `venv` module) and the script will skip the package step entirely.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/script-repo/ntnx-np4m/main/install.sh | sudo bash
@@ -125,20 +138,29 @@ curl -fsSL https://raw.githubusercontent.com/script-repo/ntnx-np4m/main/install.
 
 What it does (idempotent):
 
-1. Drops a UBI 9 repo file at `/etc/yum.repos.d/ubi.repo` so unsubscribed RHEL
-   boxes can still `dnf install` (no-op if you already have RHEL repos or are
-   on Rocky / Alma / OL).
-2. `dnf install python3.12 python3.12-pip git openssl` (falls back to
-   `python3.11` if 3.12 isn't on this minor release).
-3. Creates a system user `np4m` and clones the repo to
-   `/home/np4m/ntnx-np4m`.
-4. Builds a virtualenv and installs `requirements.txt` plus `gunicorn`.
-5. **If `NP4M_BIND != 127.0.0.1`** (the default), generates a self-signed TLS
+1. Reads `/etc/os-release`, picks one of `{debian, rhel, suse, arch, alpine}`,
+   and dispatches package installs through `apt-get` / `dnf` / `zypper` /
+   `pacman` / `apk` accordingly. On unsubscribed RHEL 8/9 also drops a UBI
+   repo so `dnf install` works without a Red Hat subscription.
+2. Finds the highest-numbered Python 3.10+ on the box that has the `venv`
+   module (scans `python3.13`, `python3.12`, `python3.11`, `python3.10`,
+   `python3`, `python`); installs one via the distro's package manager only
+   if none is found.
+3. Ensures `git` and `openssl` are present, installing them via the same
+   package manager if missing.
+4. Creates a system user `np4m` (via `useradd`, falling back to BusyBox
+   `adduser` on Alpine) and clones the repo to `/home/np4m/ntnx-np4m`.
+5. Builds a virtualenv with the detected Python and installs
+   `requirements.txt` plus `gunicorn`.
+6. **If `NP4M_BIND != 127.0.0.1`** (the default), generates a self-signed TLS
    cert at `<install-dir>/tls/np4m.{crt,key}` with the host's FQDN and
-   primary IP in the SAN, then opens the port in `firewalld` if it's active.
-6. Writes `/etc/systemd/system/np4m.service` and runs
-   `systemctl enable --now np4m`.
-7. Prints the URL, the `journalctl -u np4m -f` hint, and the result of a
+   primary IP in the SAN, then opens the port in `firewalld` or `ufw` if
+   either is active.
+7. If `systemd` is present, writes `/etc/systemd/system/np4m.service` and
+   runs `systemctl enable --now np4m`. If not (e.g. Alpine + OpenRC), prints
+   the manual `gunicorn` start line so you can wire it into your own init
+   system.
+8. Prints the URL, the `journalctl -u np4m -f` hint, and the result of a
    `curl` to `/api/version` so you can confirm the app is live.
 
 | Env var          | Default                                          | Purpose                                                |
@@ -151,8 +173,8 @@ What it does (idempotent):
 | `NP4M_HOME`      | `/home/<user>`                                   | Service user home.                                     |
 | `NP4M_DIR`       | `<home>/ntnx-np4m`                               | Install directory.                                     |
 | `NP4M_REPO_URL`  | `https://github.com/script-repo/ntnx-np4m.git`   | Fork / mirror override.                                |
-| `NP4M_PY`        | `python3.12`                                     | Force a specific interpreter package.                  |
-| `NP4M_OPEN_FW`   | `yes`                                            | Set to `no` to skip the `firewall-cmd` step.           |
+| `NP4M_PY`        | auto-detect highest 3.10+                        | Force a specific interpreter binary (full path or name on PATH). |
+| `NP4M_OPEN_FW`   | `yes`                                            | Set to `no` to skip the firewalld / ufw step.          |
 | `NP4M_SYSTEMD`   | `yes`                                            | Set to `no` to skip writing the systemd unit.          |
 
 > The self-signed cert will trip a browser warning on first visit. To use a
