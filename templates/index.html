@@ -119,6 +119,62 @@
       background: #3a1e1e; color: #fecaca; border-color: #7f1d1d;
     }
     .update-btn[data-state="error"] .dot { background: #ef4444; }
+
+    .mode-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      border-radius: 999px;
+      border: 1px solid #2a3140;
+      background: #1f2430;
+      color: #c8cfdc;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.2px;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+    }
+    .mode-pill .dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: #6b7280;
+    }
+    .mode-pill[data-mode="master"] {
+      background: #1e3a5f; color: #bfdbfe; border-color: #3b82f6;
+    }
+    .mode-pill[data-mode="master"] .dot { background: #3b82f6; }
+    .mode-pill[data-mode="probe"] {
+      background: #4a2e0f; color: #fde68a; border-color: #d97706;
+    }
+    .mode-pill[data-mode="probe"] .dot { background: #d97706; }
+    .mode-pill:hover { filter: brightness(1.1); }
+    .mode-pill:disabled { cursor: progress; opacity: 0.7; }
+
+    .probe-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12.5px;
+      margin-top: 10px;
+    }
+    .probe-table thead th {
+      text-align: left;
+      padding: 6px 10px;
+      font-weight: 600;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+      background: #fafbfc;
+    }
+    .probe-table tbody td {
+      padding: 6px 10px;
+      border-bottom: 1px solid #f1f3f6;
+      vertical-align: top;
+    }
+    .probe-table tbody tr.selected {
+      background: #eef4ff;
+    }
+    .probe-table .health-ok { color: var(--ok); font-weight: 600; }
+    .probe-table .health-bad { color: var(--err); font-weight: 600; }
     header .sub {
       margin-top: 2px;
       font-size: 12px;
@@ -458,6 +514,10 @@
       <div class="sub">Bulk-create networks on Nutanix AHV or VMware vSphere &mdash; with optional import from another Prism Central, VMware vCenter, or standalone ESXi host</div>
     </div>
     <div class="header-actions">
+      <button id="mode-pill" type="button" class="mode-pill" data-mode="master" title="Click to switch to probe mode.">
+        <span class="dot"></span>
+        <span class="label">Mode: MASTER</span>
+      </button>
       <a id="update-btn" class="update-btn" data-state="loading" title="Checking for updates...">
         <span class="dot"></span>
         <span class="label">Checking...</span>
@@ -816,6 +876,124 @@ network_VLAN_1003 1003"></textarea>
         <button id="btn-create" disabled>Create networks</button>
         <button class="secondary" id="btn-clear-log">Clear log</button>
         <span class="status" id="create-status"><span class="dot"></span><span class="text">Idle</span></span>
+      </div>
+    </section>
+
+    <!-- Step 7: Probe orchestration (master mode only) -->
+    <section class="card" id="card-probes">
+      <div style="display:flex; align-items:center;">
+        <h2>7. Probe orchestration</h2>
+        <span class="status" id="probes-status"><span class="dot"></span><span class="text">No probes</span></span>
+      </div>
+      <div class="hint">
+        Register pre-deployed probe VMs by their <em>management</em> IP, then
+        run per-VLAN reachability tests. The master re-points the probe's
+        test vNIC at each VLAN's subnet (via Prism Central), tells the probe
+        what IP/gateway to use, and asks it to ping the gateway plus an
+        external IP. The probe agent runs from this same codebase
+        (<code>python app.py --mode probe</code>) on a VM with two NICs:
+        a static <em>management</em> NIC and a <em>probe</em> NIC whose
+        subnet the master swaps per test.
+      </div>
+
+      <div class="row">
+        <div class="field" style="flex: 1 1 180px;">
+          <label for="probe-name">Name (label)</label>
+          <input type="text" id="probe-name" placeholder="probe-01" autocomplete="off" />
+        </div>
+        <div class="field" style="flex: 2 1 220px;">
+          <label for="probe-host">Probe management host / IP</label>
+          <input type="text" id="probe-host" placeholder="10.0.0.50" autocomplete="off" />
+        </div>
+        <div class="field" style="flex: 0 1 100px;">
+          <label for="probe-port">Port</label>
+          <input type="number" id="probe-port" value="5050" min="1" max="65535" />
+        </div>
+        <div class="field" style="flex: 0 1 90px;">
+          <label for="probe-https">HTTPS</label>
+          <select id="probe-https">
+            <option value="false">No</option>
+            <option value="true">Yes</option>
+          </select>
+        </div>
+        <div class="field" style="flex: 2 1 200px;">
+          <label for="probe-token">Bearer token (optional)</label>
+          <input type="password" id="probe-token" placeholder="matches NP4M_PROBE_TOKEN on probe" autocomplete="off" />
+        </div>
+        <div class="field" style="flex: 0 0 auto;">
+          <label>&nbsp;</label>
+          <button id="btn-probe-register">Register probe</button>
+        </div>
+      </div>
+
+      <div class="row" style="margin-top: 6px;">
+        <div class="field" style="flex: 0 0 auto;">
+          <label>&nbsp;</label>
+          <button class="secondary" id="btn-probe-refresh">Refresh probes</button>
+        </div>
+        <div class="field" style="flex: 1 1 auto;">
+          <label>&nbsp;</label>
+          <div class="summary-line" id="probes-meta">No probes registered.</div>
+        </div>
+      </div>
+
+      <div class="source-table-wrap" id="probe-table-wrap" style="display:none; margin-top:10px;">
+        <table class="probe-table">
+          <thead>
+            <tr>
+              <th></th>
+              <th>Name</th>
+              <th>Mgmt</th>
+              <th>Health</th>
+              <th>Test iface</th>
+              <th>Probe VM UUID</th>
+              <th>Test NIC ext id</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="probe-tbody"></tbody>
+        </table>
+      </div>
+
+      <div class="row" style="margin-top:14px;">
+        <div class="field" style="flex: 2 1 320px;">
+          <label for="probe-vm-uuid">Probe VM UUID (on the target cluster)</label>
+          <input type="text" id="probe-vm-uuid" placeholder="vmExtId from Prism" autocomplete="off" />
+        </div>
+        <div class="field" style="flex: 0 0 auto;">
+          <label>&nbsp;</label>
+          <button class="secondary" id="btn-probe-fetch-nics" disabled>Fetch probe NICs</button>
+        </div>
+        <div class="field" style="flex: 1 1 240px;">
+          <label for="probe-nic-select">Test vNIC</label>
+          <select id="probe-nic-select" disabled>
+            <option value="">-- fetch NICs first --</option>
+          </select>
+        </div>
+        <div class="field" style="flex: 0 0 auto;">
+          <label>&nbsp;</label>
+          <button class="secondary" id="btn-probe-save-nic" disabled>Save selection</button>
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:14px;">
+        <div class="field" style="flex: 1 1 100%;">
+          <label for="probe-test-iface">In-guest test iface (override; defaults to <code>NP4M_TEST_IFACE</code> on the probe)</label>
+          <input type="text" id="probe-test-iface" placeholder="e.g. ens4" autocomplete="off" />
+        </div>
+      </div>
+
+      <div style="margin-top:14px;">
+        <label for="probe-networks-input" style="font-size:12px; color:var(--muted); font-weight:500;">VLANs to test &mdash; one per line, fields are <code>name,vlan,test_ip,prefix,gateway[,external_ip]</code></label>
+        <textarea id="probe-networks-input" spellcheck="false" placeholder="# example
+mgmt_test,100,10.0.100.50,24,10.0.100.1,8.8.8.8
+storage_test,200,10.0.200.50,24,10.0.200.1,8.8.8.8"></textarea>
+        <div class="summary-line" id="probe-parse-summary">Parsed: 0 valid, 0 issue(s).</div>
+      </div>
+
+      <div class="actions">
+        <button id="btn-probe-run" disabled>Run probe tests</button>
+        <span class="status" id="probe-run-status"><span class="dot"></span><span class="text">Idle</span></span>
       </div>
     </section>
 
@@ -2086,6 +2264,444 @@ network_VLAN_1003 1003"></textarea>
       loadVcPortGroups();
     }
 
+    // -----------------------------------------------------------------
+    // Mode pill: lets the operator flip this node between MASTER and
+    // PROBE without restarting the process. The active mode is stored
+    // server-side in mode.py and we poll it on load so a TUI-driven
+    // flip is reflected in the browser on next refresh.
+    // -----------------------------------------------------------------
+    async function loadMode() {
+      try {
+        const r = await fetch("/api/mode");
+        if (!r.ok) return;
+        const j = await r.json();
+        applyModeUi(j.mode || "master");
+      } catch (_) {}
+    }
+
+    function applyModeUi(modeName) {
+      const pill = $("mode-pill");
+      if (!pill) return;
+      const label = pill.querySelector(".label");
+      pill.dataset.mode = modeName;
+      if (label) label.textContent = "Mode: " + modeName.toUpperCase();
+      pill.title = modeName === "master"
+        ? "Click to switch this node to probe mode."
+        : "Click to switch this node back to master mode.";
+      // Probe-mode would render a different template; until the page is
+      // reloaded, we just gray out master-only cards if the operator
+      // somehow ends up in probe mode on this page (rare).
+      const probeOnlyHide = modeName === "probe";
+      ["card-connect","card-cluster","card-vs","card-source","card-target-subnets","card-networks","card-create","card-probes"].forEach((id) => {
+        const el = $(id);
+        if (!el) return;
+        el.style.opacity = probeOnlyHide ? "0.4" : "";
+        el.style.pointerEvents = probeOnlyHide ? "none" : "";
+      });
+    }
+
+    async function flipMode() {
+      const pill = $("mode-pill");
+      if (!pill) return;
+      const currentMode = pill.dataset.mode || "master";
+      const next = currentMode === "master" ? "probe" : "master";
+      pill.disabled = true;
+      try {
+        const j = await postJson("/api/mode", { mode: next });
+        applyModeUi(j.mode || next);
+        addLog("system", `Switched to ${(j.mode || next).toUpperCase()} mode. Reload for the role-specific page.`);
+        // Give the user a hint that the index page is the master view.
+        if ((j.mode || next) === "probe") {
+          setTimeout(() => window.location.reload(), 800);
+        }
+      } catch (e) {
+        addLog("error", `Mode flip failed: ${e.message}`);
+      } finally {
+        pill.disabled = false;
+      }
+    }
+
+    // -----------------------------------------------------------------
+    // Probe orchestration (card 7)
+    // -----------------------------------------------------------------
+    const probeState = {
+      probes: [],
+      selectedId: null,
+      parsedNetworks: { networks: [], errors: [] },
+    };
+
+    async function loadProbes() {
+      const tbody = $("probe-tbody");
+      const wrap = $("probe-table-wrap");
+      const meta = $("probes-meta");
+      try {
+        const r = await fetch("/api/probes");
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        const j = await r.json();
+        probeState.probes = j.probes || [];
+      } catch (e) {
+        meta.textContent = `Could not list probes: ${e.message}`;
+        return;
+      }
+      tbody.innerHTML = "";
+      if (probeState.probes.length === 0) {
+        wrap.style.display = "none";
+        meta.textContent = "No probes registered.";
+        setStatus("probes-status", null, "No probes");
+        updateRunProbesButton();
+        return;
+      }
+      wrap.style.display = "";
+      probeState.probes.forEach((p) => {
+        const tr = document.createElement("tr");
+        if (p.id === probeState.selectedId) tr.classList.add("selected");
+        tr.dataset.probeId = p.id;
+        tr.addEventListener("click", (ev) => {
+          if (ev.target.tagName === "BUTTON") return;
+          selectProbe(p.id);
+        });
+
+        const tdSel = document.createElement("td");
+        const radio = document.createElement("input");
+        radio.type = "radio";
+        radio.name = "probe-sel";
+        radio.value = p.id;
+        radio.checked = p.id === probeState.selectedId;
+        radio.addEventListener("change", () => selectProbe(p.id));
+        tdSel.appendChild(radio);
+        tr.appendChild(tdSel);
+
+        const tdName = document.createElement("td");
+        tdName.textContent = p.name || "(unnamed)";
+        tr.appendChild(tdName);
+
+        const tdMgmt = document.createElement("td");
+        const scheme = p.use_https ? "https" : "http";
+        tdMgmt.textContent = `${scheme}://${p.mgmt_host}:${p.mgmt_port}`;
+        tr.appendChild(tdMgmt);
+
+        const tdHealth = document.createElement("td");
+        const h = p.health || {};
+        if (h.reachable) {
+          tdHealth.innerHTML = `<span class="health-ok">OK</span>`;
+          if (h.hostname) {
+            const sm = document.createElement("div");
+            sm.className = "uplinks";
+            sm.textContent = h.hostname;
+            tdHealth.appendChild(sm);
+          }
+        } else {
+          tdHealth.innerHTML = `<span class="health-bad">unreachable</span>`;
+          if (h.error) {
+            const sm = document.createElement("div");
+            sm.className = "uplinks";
+            sm.textContent = h.error;
+            tdHealth.appendChild(sm);
+          }
+        }
+        tr.appendChild(tdHealth);
+
+        const tdIface = document.createElement("td");
+        tdIface.textContent = h.test_iface ? `${h.test_iface}${h.test_ip ? " (" + h.test_ip + ")" : ""}` : "—";
+        tr.appendChild(tdIface);
+
+        const tdVm = document.createElement("td");
+        tdVm.className = "uplinks";
+        tdVm.textContent = p.probe_vm_uuid || "—";
+        tr.appendChild(tdVm);
+
+        const tdNic = document.createElement("td");
+        tdNic.className = "uplinks";
+        tdNic.textContent = p.test_nic_ext_id || "—";
+        tr.appendChild(tdNic);
+
+        const tdActions = document.createElement("td");
+        const del = document.createElement("button");
+        del.className = "secondary";
+        del.textContent = "Remove";
+        del.addEventListener("click", async () => {
+          if (!confirm(`Remove probe '${p.name}'?`)) return;
+          try {
+            await postJson("/api/probes/delete", { probe_id: p.id });
+            if (probeState.selectedId === p.id) probeState.selectedId = null;
+            addLog("ok", `Probe '${p.name}' removed.`);
+            loadProbes();
+          } catch (e) {
+            addLog("error", `Remove failed: ${e.message}`);
+          }
+        });
+        tdActions.appendChild(del);
+        tr.appendChild(tdActions);
+
+        tbody.appendChild(tr);
+      });
+      meta.textContent = `${probeState.probes.length} probe(s) registered.`;
+      setStatus("probes-status", "ok", `${probeState.probes.length} probe(s)`);
+      updateRunProbesButton();
+    }
+
+    function selectProbe(probeId) {
+      probeState.selectedId = probeId;
+      const p = probeState.probes.find((x) => x.id === probeId);
+      $("probe-vm-uuid").value = (p && p.probe_vm_uuid) || "";
+      const nicSel = $("probe-nic-select");
+      nicSel.innerHTML = '<option value="">-- fetch NICs to populate --</option>';
+      nicSel.disabled = true;
+      $("btn-probe-save-nic").disabled = true;
+      $("btn-probe-fetch-nics").disabled = !(p && p.probe_vm_uuid && state.token);
+      // Reflect the radio selection in the table.
+      document.querySelectorAll("#probe-tbody tr").forEach((tr) => {
+        if (tr.dataset.probeId === probeId) tr.classList.add("selected");
+        else tr.classList.remove("selected");
+      });
+      document.querySelectorAll('input[name="probe-sel"]').forEach((r) => {
+        r.checked = r.value === probeId;
+      });
+      updateRunProbesButton();
+    }
+
+    async function registerProbe() {
+      const name = $("probe-name").value.trim();
+      const mgmt_host = $("probe-host").value.trim();
+      const mgmt_port = parseInt($("probe-port").value, 10) || 5050;
+      const use_https = $("probe-https").value === "true";
+      const token = $("probe-token").value.trim();
+      if (!mgmt_host) {
+        addLog("error", "Probe management host is required.");
+        return;
+      }
+      $("btn-probe-register").disabled = true;
+      try {
+        const res = await postJson("/api/probes/register", {
+          name, mgmt_host, mgmt_port, use_https, token,
+        });
+        addLog("ok", `Probe '${res.probe.name}' registered (id ${res.probe.id}).`);
+        $("probe-name").value = "";
+        $("probe-host").value = "";
+        $("probe-token").value = "";
+        await loadProbes();
+        selectProbe(res.probe.id);
+      } catch (e) {
+        addLog("error", `Probe register failed: ${e.message}`);
+      } finally {
+        $("btn-probe-register").disabled = false;
+      }
+    }
+
+    async function fetchProbeNics() {
+      const vmUuid = $("probe-vm-uuid").value.trim();
+      if (!state.token) {
+        addLog("error", "Connect to a target Prism Central first (step 1).");
+        return;
+      }
+      if (!vmUuid) {
+        addLog("error", "Probe VM UUID is required.");
+        return;
+      }
+      const btn = $("btn-probe-fetch-nics");
+      btn.disabled = true;
+      try {
+        const res = await postJson("/api/probes/vm-nics", {
+          target_token: state.token,
+          vm_ext_id: vmUuid,
+        });
+        const nics = res.nics || [];
+        const sel = $("probe-nic-select");
+        sel.innerHTML = "";
+        if (nics.length === 0) {
+          sel.innerHTML = '<option value="">(no NICs on this VM)</option>';
+          sel.disabled = true;
+          $("btn-probe-save-nic").disabled = true;
+          addLog("error", "VM returned 0 NICs.");
+          return;
+        }
+        const placeholder = document.createElement("option");
+        placeholder.value = "";
+        placeholder.textContent = "-- pick the TEST NIC --";
+        sel.appendChild(placeholder);
+        nics.forEach((n, idx) => {
+          const opt = document.createElement("option");
+          opt.value = n.extId;
+          const sub = (n.subnet && (n.subnet.name || (n.subnet.extId || "").slice(0, 8))) || "?";
+          opt.textContent = `#${idx} mac=${n.mac || "?"} subnet=${sub}`;
+          sel.appendChild(opt);
+        });
+        sel.disabled = false;
+        $("btn-probe-save-nic").disabled = false;
+        addLog("info", `Loaded ${nics.length} vNIC(s) from VM ${vmUuid.slice(0,8)}.`);
+      } catch (e) {
+        addLog("error", `Fetch NICs failed: ${e.message}`);
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    async function saveProbeNicSelection() {
+      const probeId = probeState.selectedId;
+      const vmUuid = $("probe-vm-uuid").value.trim();
+      const nicId = $("probe-nic-select").value;
+      if (!probeId) {
+        addLog("error", "Pick a probe in the table first.");
+        return;
+      }
+      if (!vmUuid || !nicId) {
+        addLog("error", "VM UUID and test NIC are required.");
+        return;
+      }
+      try {
+        await postJson("/api/probes/update", {
+          probe_id: probeId,
+          probe_vm_uuid: vmUuid,
+          test_nic_ext_id: nicId,
+        });
+        addLog("ok", "Probe VM UUID + test NIC saved.");
+        await loadProbes();
+        selectProbe(probeId);
+      } catch (e) {
+        addLog("error", `Save failed: ${e.message}`);
+      }
+    }
+
+    function parseProbeNetworks() {
+      const text = $("probe-networks-input").value;
+      const networks = [];
+      const errors = [];
+      const seen = new Set();
+      text.split(/\r?\n/).forEach((raw, idx) => {
+        const line = raw.trim();
+        if (!line || line.startsWith("#")) return;
+        const parts = line.split(/[,\s\t]+/).filter(Boolean);
+        if (parts.length < 5) {
+          errors.push(`Line ${idx+1}: need at least name,vlan,test_ip,prefix,gateway`);
+          return;
+        }
+        const [name, vlanStr, testIp, prefixStr, gateway, externalIp] = parts;
+        const vlan = parseInt(vlanStr, 10);
+        const prefix = parseInt(prefixStr, 10);
+        if (!Number.isInteger(vlan) || vlan < 0 || vlan > 4094) {
+          errors.push(`Line ${idx+1}: invalid VLAN '${vlanStr}'`);
+          return;
+        }
+        if (!Number.isInteger(prefix) || prefix < 1 || prefix > 32) {
+          errors.push(`Line ${idx+1}: invalid prefix '${prefixStr}'`);
+          return;
+        }
+        if (!/^\d+\.\d+\.\d+\.\d+$/.test(testIp)) {
+          errors.push(`Line ${idx+1}: invalid IP '${testIp}'`);
+          return;
+        }
+        if (!/^\d+\.\d+\.\d+\.\d+$/.test(gateway)) {
+          errors.push(`Line ${idx+1}: invalid gateway '${gateway}'`);
+          return;
+        }
+        if (externalIp && !/^\d+\.\d+\.\d+\.\d+$/.test(externalIp)) {
+          errors.push(`Line ${idx+1}: invalid external IP '${externalIp}'`);
+          return;
+        }
+        if (seen.has(name.toLowerCase())) {
+          errors.push(`Line ${idx+1}: duplicate name '${name}'`);
+          return;
+        }
+        seen.add(name.toLowerCase());
+        networks.push({
+          name, vlan,
+          test_ip: testIp,
+          prefix,
+          gateway,
+          external_ip: externalIp || "",
+        });
+      });
+      probeState.parsedNetworks = { networks, errors };
+      const summary = $("probe-parse-summary");
+      const errPart = errors.length
+        ? ` <span class="err-text">${errors.length} issue(s)</span>: ${errors.slice(0,3).join("; ")}${errors.length > 3 ? "..." : ""}`
+        : "";
+      summary.innerHTML = `Parsed: <strong>${networks.length}</strong> valid,${errPart || " 0 issue(s)."}`;
+      updateRunProbesButton();
+    }
+
+    function updateRunProbesButton() {
+      const probe = probeState.probes.find((p) => p.id === probeState.selectedId);
+      const ok = !!state.token
+        && !!$("cluster-select").value
+        && !!probe
+        && !!probe.probe_vm_uuid
+        && !!probe.test_nic_ext_id
+        && probeState.parsedNetworks.networks.length > 0;
+      $("btn-probe-run").disabled = !ok;
+    }
+
+    async function runProbeTests() {
+      const probe = probeState.probes.find((p) => p.id === probeState.selectedId);
+      const clusterUuid = $("cluster-select").value;
+      if (!probe || !clusterUuid || !state.token) return;
+      if (probeState.parsedNetworks.networks.length === 0) return;
+      $("btn-probe-run").disabled = true;
+      setStatus("probe-run-status", "busy", "Running...");
+      addLog("system",
+        `Probe-test run: ${probeState.parsedNetworks.networks.length} VLAN(s) via probe '${probe.name}'.`);
+      let resp;
+      try {
+        resp = await fetch("/api/probe-tests/run", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            probe_id: probe.id,
+            target_token: state.token,
+            cluster_uuid: clusterUuid,
+            test_iface: $("probe-test-iface").value.trim() || undefined,
+            networks: probeState.parsedNetworks.networks,
+          }),
+        });
+      } catch (e) {
+        addLog("error", `Probe run request failed: ${e.message}`);
+        setStatus("probe-run-status", "err", "Failed");
+        $("btn-probe-run").disabled = false;
+        return;
+      }
+      if (!resp.ok) {
+        let errMsg = "HTTP " + resp.status;
+        try {
+          const j = await resp.json();
+          if (j && j.error) errMsg = j.error;
+        } catch (_) {}
+        addLog("error", `Server rejected probe run: ${errMsg}`);
+        setStatus("probe-run-status", "err", "Failed");
+        $("btn-probe-run").disabled = false;
+        return;
+      }
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      let okCount = 0;
+      let failCount = 0;
+      while (true) {
+        let chunk;
+        try { chunk = await reader.read(); }
+        catch (e) { addLog("error", `Stream read error: ${e.message}`); break; }
+        if (chunk.done) break;
+        buf += decoder.decode(chunk.value, { stream: true });
+        let idx;
+        while ((idx = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, idx);
+          buf = buf.slice(idx + 1);
+          if (!line.trim()) continue;
+          let evt;
+          try { evt = JSON.parse(line); } catch (_) { continue; }
+          addLog(evt.level || "info", evt.msg || "");
+          if (evt.level === "ok") okCount++;
+          else if (evt.level === "error") failCount++;
+        }
+      }
+      if (failCount > 0) {
+        setStatus("probe-run-status", "err", `Done with ${failCount} error(s)`);
+      } else {
+        setStatus("probe-run-status", "ok", `Done (${okCount} pass)`);
+      }
+      updateRunProbesButton();
+      await loadProbes();
+    }
+
     document.addEventListener("DOMContentLoaded", () => {
       $("btn-connect").addEventListener("click", doConnect);
       $("pc-pass").addEventListener("keydown", (e) => {
@@ -2193,6 +2809,21 @@ network_VLAN_1003 1003"></textarea>
       parseNetworks();
 
       setupUpdateButton();
+
+      // Mode toggle + probe orchestration card 7
+      const modePill = $("mode-pill");
+      if (modePill) modePill.addEventListener("click", flipMode);
+      loadMode();
+
+      $("btn-probe-register").addEventListener("click", registerProbe);
+      $("btn-probe-refresh").addEventListener("click", loadProbes);
+      $("btn-probe-fetch-nics").addEventListener("click", fetchProbeNics);
+      $("btn-probe-save-nic").addEventListener("click", saveProbeNicSelection);
+      $("btn-probe-run").addEventListener("click", runProbeTests);
+      $("probe-networks-input").addEventListener("input", parseProbeNetworks);
+      $("cluster-select").addEventListener("change", updateRunProbesButton);
+      parseProbeNetworks();
+      loadProbes();
     });
 
     async function setupUpdateButton() {

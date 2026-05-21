@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NP4M Probe</title>
+  <style>
+    :root {
+      --bg: #0f1216;
+      --panel: #161b22;
+      --border: #2a3140;
+      --text: #e5e7eb;
+      --muted: #9ca3af;
+      --accent: #f59e0b;
+      --accent-hover: #d97706;
+      --ok: #86efac;
+      --err: #fca5a5;
+      --warn: #fcd34d;
+      --info: #93c5fd;
+      --radius: 8px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                   "Helvetica Neue", Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 14px;
+      line-height: 1.45;
+    }
+    header {
+      background: #000;
+      color: #fff;
+      padding: 16px 28px;
+      border-bottom: 1px solid #1f2430;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    header h1 { margin: 0; font-size: 17px; font-weight: 600; letter-spacing: 0.2px; }
+    header .sub { margin-top: 2px; font-size: 12px; color: var(--muted); }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      border-radius: 999px;
+      border: 1px solid var(--accent);
+      background: #4a2e0f;
+      color: #fde68a;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .pill .dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--accent);
+    }
+    button {
+      font: inherit;
+      font-weight: 600;
+      color: #fff;
+      background: var(--accent);
+      border: none;
+      border-radius: 6px;
+      padding: 8px 14px;
+      cursor: pointer;
+    }
+    button:hover { background: var(--accent-hover); }
+    button.secondary {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    main {
+      max-width: 1000px;
+      margin: 0 auto;
+      padding: 24px 28px 16px;
+      display: grid;
+      gap: 16px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+    }
+    .card h2 {
+      margin: 0 0 8px 0;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 200px 1fr;
+      gap: 6px 16px;
+    }
+    .grid div.k { color: var(--muted); }
+    .grid div.v { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; word-break: break-all; }
+    .badge {
+      display: inline-block;
+      padding: 1px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .badge.ok { background: #064e3b; color: #d1fae5; }
+    .badge.bad { background: #3a1e1e; color: #fecaca; }
+    .badge.warn { background: #4a2e0f; color: #fde68a; }
+    .logpane {
+      background: #000;
+      color: var(--text);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12.5px;
+      padding: 12px;
+      max-height: 360px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      border-radius: 6px;
+    }
+    .logline.info  { color: var(--info); }
+    .logline.ok    { color: var(--ok); }
+    .logline.error { color: var(--err); }
+    .logline.warn  { color: var(--warn); }
+    .logline .ts   { color: var(--muted); margin-right: 8px; }
+    .actions { display: flex; gap: 10px; align-items: center; margin-top: 4px; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>NP4M Probe Agent <span style="font-weight:400; color:var(--muted);">v{{ version }} build {{ build }}</span></h1>
+      <div class="sub">This node is running as a probe. The master pushes test instructions here over the management NIC.</div>
+    </div>
+    <div style="display:flex; gap:8px; align-items:center;">
+      <span class="pill"><span class="dot"></span><span>Mode: PROBE</span></span>
+      <button class="secondary" id="btn-to-master">Switch to master</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>Health</h2>
+      <div class="grid" id="health-grid">
+        <div class="k">Loading...</div><div class="v">—</div>
+      </div>
+      <div class="actions">
+        <button id="btn-refresh-health" class="secondary">Refresh</button>
+        <span id="health-meta" style="color:var(--muted); font-size:12px;"></span>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Interfaces</h2>
+      <table style="width:100%; border-collapse: collapse; font-size:12.5px;">
+        <thead>
+          <tr style="text-align:left; color:var(--muted);">
+            <th style="padding:6px 8px; border-bottom:1px solid var(--border);">Name</th>
+            <th style="padding:6px 8px; border-bottom:1px solid var(--border);">IPv4</th>
+            <th style="padding:6px 8px; border-bottom:1px solid var(--border);">Role</th>
+          </tr>
+        </thead>
+        <tbody id="iface-tbody"></tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>Recent activity</h2>
+      <div class="logpane" id="logpane"></div>
+      <div class="actions">
+        <button id="btn-refresh-logs" class="secondary">Refresh logs</button>
+        <span id="logs-meta" style="color:var(--muted); font-size:12px;"></span>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    function fmtTs(ts) {
+      if (!ts) return "";
+      try { return new Date(ts * 1000).toLocaleTimeString(); } catch (_) { return ""; }
+    }
+
+    async function loadHealth() {
+      const grid = $("health-grid");
+      const meta = $("health-meta");
+      const ifaceTbody = $("iface-tbody");
+      try {
+        const r = await fetch("/probe/health");
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        const j = await r.json();
+        const rows = [
+          ["Hostname", j.hostname || "?"],
+          ["Mode", (j.mode || "?").toUpperCase()],
+          ["Build", `v${j.version} build ${j.build}`],
+          ["Platform", j.platform || "?"],
+          ["Mgmt iface", j.mgmt_iface ? `${j.mgmt_iface}${j.mgmt_ip ? " ("+j.mgmt_ip+")" : ""}` : "(unset)"],
+          ["Test iface", j.test_iface ? `${j.test_iface}${j.test_ip ? " ("+j.test_ip+")" : ""}` : "(unset)"],
+          ["Auth required", j.auth_required ? "yes (Bearer)" : "no (set NP4M_PROBE_TOKEN!)"],
+        ];
+        grid.innerHTML = "";
+        for (const [k, v] of rows) {
+          const dk = document.createElement("div"); dk.className = "k"; dk.textContent = k;
+          const dv = document.createElement("div"); dv.className = "v"; dv.textContent = v;
+          grid.appendChild(dk); grid.appendChild(dv);
+        }
+        ifaceTbody.innerHTML = "";
+        const mgmt = j.mgmt_iface;
+        const test = j.test_iface;
+        (j.interfaces || []).forEach((it) => {
+          const tr = document.createElement("tr");
+          const tdName = document.createElement("td");
+          tdName.style.padding = "6px 8px";
+          tdName.style.borderBottom = "1px solid var(--border)";
+          tdName.textContent = it.name || "?";
+          const tdIp = document.createElement("td");
+          tdIp.style.padding = "6px 8px";
+          tdIp.style.borderBottom = "1px solid var(--border)";
+          tdIp.style.fontFamily = "ui-monospace, monospace";
+          tdIp.textContent = it.ipv4 || "—";
+          const tdRole = document.createElement("td");
+          tdRole.style.padding = "6px 8px";
+          tdRole.style.borderBottom = "1px solid var(--border)";
+          if (it.name === mgmt) {
+            const b = document.createElement("span");
+            b.className = "badge ok"; b.textContent = "MGMT (do-not-touch)";
+            tdRole.appendChild(b);
+          } else if (it.name === test) {
+            const b = document.createElement("span");
+            b.className = "badge warn"; b.textContent = "TEST (master-managed)";
+            tdRole.appendChild(b);
+          } else {
+            tdRole.textContent = "—";
+          }
+          tr.appendChild(tdName); tr.appendChild(tdIp); tr.appendChild(tdRole);
+          ifaceTbody.appendChild(tr);
+        });
+        meta.textContent = `Refreshed ${new Date().toLocaleTimeString()}.`;
+      } catch (e) {
+        meta.textContent = "Health failed: " + e.message;
+      }
+    }
+
+    async function loadLogs() {
+      const pane = $("logpane");
+      const meta = $("logs-meta");
+      try {
+        const r = await fetch("/probe/logs?limit=200");
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        const j = await r.json();
+        pane.innerHTML = "";
+        (j.logs || []).forEach((entry) => {
+          const line = document.createElement("div");
+          line.className = "logline " + (entry.level || "info");
+          const ts = document.createElement("span"); ts.className = "ts";
+          ts.textContent = "[" + fmtTs(entry.ts) + "]";
+          const msg = document.createElement("span");
+          msg.textContent = " " + (entry.msg || "");
+          line.appendChild(ts); line.appendChild(msg);
+          pane.appendChild(line);
+        });
+        pane.scrollTop = pane.scrollHeight;
+        meta.textContent = `${(j.logs || []).length} entry(ies).`;
+      } catch (e) {
+        meta.textContent = "Logs failed: " + e.message;
+      }
+    }
+
+    async function switchToMaster() {
+      if (!confirm("Switch this node to MASTER mode? The probe endpoints will stop serving until you flip back.")) return;
+      try {
+        const r = await fetch("/api/mode", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mode: "master" }),
+        });
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        setTimeout(() => window.location.reload(), 600);
+      } catch (e) {
+        alert("Mode flip failed: " + e.message);
+      }
+    }
+
+    document.addEventListener("DOMContentLoaded", () => {
+      $("btn-refresh-health").addEventListener("click", loadHealth);
+      $("btn-refresh-logs").addEventListener("click", loadLogs);
+      $("btn-to-master").addEventListener("click", switchToMaster);
+      loadHealth();
+      loadLogs();
+      setInterval(loadHealth, 10000);
+      setInterval(loadLogs, 5000);
+    });
+  </script>
+</body>
+</html>

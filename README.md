@@ -110,17 +110,44 @@ are flagged and never auto-imported.
 A standalone CLI helper (`create_subnets.py`) is included for scripted /
 non-UI provisioning of Nutanix subnets.
 
+### Probe + master mode (L3 reachability tests)
+NP4M can also drive a fleet of pre-deployed **probe VMs** to validate that
+the VLAN-backed subnets it just created actually carry traffic. The same
+binary runs in either **master** or **probe** mode; flip between roles at
+runtime from the Web UI's header pill or the Textual TUI (`tui.py`).
+
+See [Probe + master mode](#probe--master-mode) below for the full
+walkthrough; the short version is:
+
+- A probe VM has two vNICs — a static **management NIC** the master talks
+  to, and a **probe NIC** whose subnet/IP the master swaps per test.
+- Per VLAN, the master:
+  1. Re-points the probe's test vNIC at the target subnet via the Prism
+     Central v4 VM API,
+  2. POSTs to the probe to reconfigure its in-guest test iface with a
+     user-supplied `IP / prefix / gateway`,
+  3. POSTs to the probe to ping the gateway then an external IP,
+  4. Streams a green / amber / red verdict per VLAN to the existing log
+     pane (same NDJSON path as `Create networks`).
+
 ---
 
 ## Repository layout
 
 ```
 ntnx-np4m/
-├── app.py               # Flask backend (target + source endpoints, streaming /api/create)
+├── app.py                    # Flask backend; wires mode + role blueprints
+├── mode.py                   # Thread-safe mode controller (MASTER / PROBE)
+├── master_probe_routes.py    # Master-side probe orchestration endpoints
+├── probe_routes.py           # Probe-side HTTP API (/probe/*)
+├── iface.py                  # Probe-side in-guest NIC configuration
+├── tester.py                 # Probe-side ping wrapper
+├── tui.py                    # Optional Textual TUI (master + probe dashboard)
 ├── templates/
-│   └── index.html       # Single-page UI (HTML + CSS + vanilla JS, no build step)
-├── create_subnets.py    # Optional CLI: create N unmanaged VLAN subnets
-├── requirements.txt     # Python deps
+│   ├── index.html            # Master UI (cards 1-7)
+│   └── probe.html            # Probe status page
+├── create_subnets.py         # Optional CLI: create N unmanaged VLAN subnets
+├── requirements.txt          # Python deps
 ├── .gitignore
 └── README.md
 ```
@@ -739,6 +766,206 @@ same async task polling, same `NTNX-Request-Id` idempotency header.
 
 > The CLI currently supports basic-auth only. The web app is the
 > recommended surface if you need API-key auth.
+
+---
+
+## Probe + master mode
+
+NP4M can drive a fleet of pre-deployed **probe VMs** to validate that the
+L2 networks you just created actually carry traffic. The same binary
+runs in either role; flip between them at runtime from the Web UI header
+pill, a `POST /api/mode` call, or the Textual TUI's `m` keybinding.
+
+### How it works
+
+```
++-------------------+                +-------------------------+
+|  NP4M Master      |                |  Probe VM (Linux)       |
+|  (Web UI + TUI)   |--mgmt HTTPS--->|  python app.py --mode   |
+|  + PC v4 API      |                |       probe             |
++---------+---------+                +-----------+-------------+
+          |                                      |
+          | (1) PUT /api/vmm/v4.0/ahv/config/    |
+          |     vms/{id}/nics/{nicId}            |
+          |     -> swap test vNIC's subnet       |
+          v                                      |
+     +---------+                                 |
+     | Prism   |                                 |
+     | Central |--re-attaches test NIC to VLAN-->| test vNIC bounces, in-guest carrier flips
+     +---------+                                 |
+          ^                                      |
+          |        (2) POST /probe/configure     |
+          |  master tells probe: ip/gw/prefix    |
+          |        (3) POST /probe/run-test      |
+          |  master tells probe: ping gw + ext   |
+          +--------------------------------------+
+```
+
+The master never has to reach the test VLAN itself. All it needs is HTTP
+access to the probe's **management** IP, which stays static the whole
+time.
+
+### Deploying a probe VM
+
+Pre-deploy the VM yourself on a cluster the master can reach. Requirements:
+
+- A modern Linux distro with **either** `NetworkManager` (`nmcli`) **or**
+  `iproute2` (`ip`) on PATH, and `ping`. Tested on Ubuntu 22.04+,
+  Rocky/Alma 9, Debian 12.
+- **Two vNICs** in this order:
+  1. `vNIC[0]` — attached to a known management subnet, **static IP**
+     that the master can reach. This NIC is never touched after install.
+  2. `vNIC[1]` — initially attached to any subnet; the master swaps its
+     subnet via PC v4 per test.
+- Same `ntnx-np4m` checkout the master uses, with deps installed:
+
+  ```bash
+  git clone https://github.com/script-repo/ntnx-np4m.git /opt/np4m
+  cd /opt/np4m
+  python -m venv .venv && source .venv/bin/activate
+  pip install -r requirements.txt
+  ```
+
+- Set the probe-side env vars so the agent knows which iface is which
+  and how to authenticate the master:
+
+  | Env var              | Required | What it does                                       |
+  |----------------------|----------|----------------------------------------------------|
+  | `NP4M_MODE`          | yes      | Set to `probe` so the process boots in probe mode. |
+  | `NP4M_MGMT_IFACE`    | yes      | Name of the static mgmt iface (e.g. `ens3`). The probe refuses to reconfigure this iface, even if instructed. |
+  | `NP4M_TEST_IFACE`    | yes      | Name of the probe / test iface (e.g. `ens4`). Used as the default target for `POST /probe/configure`. |
+  | `NP4M_PROBE_TOKEN`   | strongly | Bearer token the master must present on every write endpoint. If unset the probe runs **open**; only use that in an isolated lab. |
+  | `NP4M_PROBE_PORT`    | no       | Suggested listen port for the probe (default 5050; the launcher reads `WEB_PORT`). |
+  | `WEB_HOST`           | yes      | Bind to the mgmt IP (or `0.0.0.0` in a closed lab). |
+  | `WEB_PORT`           | yes      | Port the master will hit (default 5050 in probe mode). |
+
+  Example (Linux, systemd-friendly):
+
+  ```bash
+  export NP4M_MODE=probe
+  export NP4M_MGMT_IFACE=ens3
+  export NP4M_TEST_IFACE=ens4
+  export NP4M_PROBE_TOKEN="$(openssl rand -hex 24)"
+  export WEB_HOST=0.0.0.0
+  export WEB_PORT=5050
+  python app.py
+  # Or, equivalently, override mode from the CLI:
+  # python app.py --mode probe
+  ```
+
+  Save the value of `NP4M_PROBE_TOKEN` — you need to paste it into the
+  master Web UI when registering the probe.
+
+- Hit `https://<probe-mgmt-ip>:5050/` (or `http://` in your lab) to
+  confirm the probe's status page renders. It shows the resolved
+  mgmt / test interfaces, recent activity, and a "Switch to master"
+  button if you ever need to repurpose the VM.
+
+### Registering and driving probes from the master
+
+1. Start the master in the usual way (`python app.py`) and open the Web
+   UI. The header now shows a **MODE: MASTER** pill — clicking it flips
+   the node to probe mode (rare on a master).
+2. Connect to a target Prism Central in card 1 as you normally would.
+   The probe orchestration uses the *target* PC session to swap the
+   probe VM's NIC subnet, so this step is required.
+3. Scroll to **card 7 — Probe orchestration** and register a probe:
+   - **Name**: free-form label (`probe-cluster-a`).
+   - **Mgmt host / port**: the probe's static management IP and port.
+   - **HTTPS**: pick yes if the probe is serving TLS; otherwise no.
+   - **Bearer token**: paste `NP4M_PROBE_TOKEN` from the probe.
+   - Click **Register probe**. The row's *Health* column should flip to
+     **OK** and surface the probe's hostname + detected `test_iface`.
+4. Tell the master which vNIC on the probe VM is the "test" NIC:
+   - Paste the probe VM's `extId` (visible in PC) into **Probe VM UUID**.
+   - Click **Fetch probe NICs**. The dropdown populates with each vNIC
+     and its current subnet.
+   - Pick the one wired to the test iface inside the guest, click
+     **Save selection**. The probe row now shows the saved VM UUID + NIC
+     ext id.
+5. Enter the per-VLAN test rows into the textarea, one per line:
+
+   ```
+   # name, vlan, test_ip, prefix, gateway, external_ip
+   mgmt_test,100,10.0.100.50,24,10.0.100.1,8.8.8.8
+   storage_test,200,10.0.200.50,24,10.0.200.1,8.8.8.8
+   dmz_test,300,10.0.300.50,24,10.0.300.1,1.1.1.1
+   ```
+
+   - VLAN must already exist as a subnet on the **target cluster** you
+     picked in card 2 (the master looks it up by `networkId`). Run
+     `Create networks` first if you're testing freshly-built VLANs.
+   - `external_ip` is optional; leave blank to ping only the gateway.
+6. Click **Run probe tests**. The log pane streams one block per VLAN:
+
+   ```
+   [10:00:01] Probe-test run: 3 VLAN(s) via probe 'probe-01'.
+   [10:00:01]   probe reachable: probe-01.lab (test_iface=ens4)
+   [10:00:01] VLAN 100 (mgmt_test): finding target subnet on cluster...
+   [10:00:01]   subnet extId: 51b3...c4f1
+   [10:00:01]   pointing probe NIC abc...123 at this subnet...
+   [10:00:04]   configuring probe iface ens4 -> 10.0.100.50/24 gw 10.0.100.1
+   [10:00:04]     backend=nmcli
+   [10:00:04]   pinging gw 10.0.100.1 then 8.8.8.8...
+   [10:00:08]   PASS: VLAN 100 (mgmt_test) — gw OK, external OK
+   [10:00:08] VLAN 200 (storage_test): ...
+   ...
+   [10:00:22] Done. 2 pass, 1 partial, 0 fail (of 3).
+   ```
+
+   Colors: green for `PASS`, amber for `PARTIAL` (gateway OK but no
+   route to the external IP), red for `FAIL`.
+
+### TUI
+
+The Textual TUI shows the same information in a terminal. Useful for
+ssh-only sessions and lets you flip modes without a browser:
+
+```bash
+python tui.py            # talks to http://127.0.0.1:5000 by default
+NP4M_URL=http://10.0.0.5:8080 python tui.py
+```
+
+Keybindings: `m` to switch mode, `r` to refresh, `q` to quit.
+
+### REST surface (probe + master orchestration)
+
+| Method | Path                                | Mode    | Purpose                                            |
+|--------|-------------------------------------|---------|----------------------------------------------------|
+| GET    | `/api/mode`                         | both    | Read current role                                  |
+| POST   | `/api/mode`                         | both    | `{mode: "master"\|"probe"}` to flip in-process     |
+| POST   | `/api/probes/register`              | master  | Add a probe by mgmt host + token                   |
+| GET    | `/api/probes`                       | master  | List + live `/probe/health` per probe              |
+| POST   | `/api/probes/update`                | master  | Patch VM UUID / test NIC after register            |
+| POST   | `/api/probes/delete`                | master  | Remove a probe                                     |
+| POST   | `/api/probes/health`                | master  | Force a single-probe health re-check               |
+| POST   | `/api/probes/vm-nics`               | master  | List a probe VM's vNICs via PC v4 (for the picker) |
+| POST   | `/api/probe-tests/run`              | master  | Stream NDJSON: swap subnet + configure + ping      |
+| GET    | `/probe/health`                     | probe   | Unauthenticated discovery                          |
+| POST   | `/probe/configure`                  | probe   | `{iface, ip, prefix, gateway}` -> apply via nmcli/ip |
+| POST   | `/probe/run-test`                   | probe   | `{gateway, external_ip, count, timeout_s}` -> ping |
+| GET    | `/probe/logs`                       | probe   | Tail the probe's recent activity                   |
+
+Endpoints belonging to the other role return **HTTP 423 Locked** with a
+`{current_mode, required_mode}` payload so the UI / TUI can prompt for a
+mode flip.
+
+### Security notes
+
+- The probe agent's write endpoints (`/probe/configure`, `/probe/run-test`,
+  `/probe/logs`) require a bearer token that matches `NP4M_PROBE_TOKEN`;
+  the master sends it as `Authorization: Bearer <token>`. **Do not run
+  the probe without setting this env var on anything but an isolated
+  lab network** — anyone who can reach the management IP can otherwise
+  reconfigure the test NIC and trigger pings to arbitrary addresses.
+- `/probe/health` is intentionally open so a master can discover an
+  unauthenticated probe before bootstrapping a token onto it (e.g. via
+  cloud-init or out-of-band SSH).
+- The probe refuses to reconfigure the management NIC even if asked, so
+  a typo in the master can't take the session offline mid-run.
+- TLS for the probe blueprint follows the same self-signed-cert pattern
+  as the rest of NP4M; pass cert paths via `NP4M_TLS_CERT` /
+  `NP4M_TLS_KEY` (Linux installer) or run behind a reverse proxy.
 
 ---
 

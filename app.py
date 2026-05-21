@@ -56,7 +56,7 @@ from flask import (
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 __version__ = "0.2.0"
-BUILD = 14   # bump on every commit
+BUILD = 16   # bump on every commit
 
 app = Flask(__name__)
 
@@ -64,6 +64,73 @@ SESSIONS: dict[str, dict[str, Any]] = {}
 SOURCE_SESSIONS: dict[str, dict[str, Any]] = {}
 TARGET_VCENTER_SESSIONS: dict[str, dict[str, Any]] = {}
 SESSION_TTL_SECONDS = 3600
+
+# ---------------------------------------------------------------------------
+# Role controller + role-scoped blueprints. The same Flask process runs in
+# either MASTER or PROBE mode (toggled at runtime via /api/mode or the TUI).
+# Routes belonging to the inactive role return HTTP 423 from the
+# before_request hook below, so the Web UI / TUI can fail fast and tell the
+# operator to flip the mode.
+# ---------------------------------------------------------------------------
+import mode as _mode  # noqa: E402  (after Flask app construction by design)
+
+# Routes that are always available, regardless of mode. The endpoints
+# below are added below this list (api_index, api_version, etc.).
+_ALWAYS_ON_ENDPOINTS: set[str] = {
+    "static",
+    "index",
+    "api_version",
+    "api_check_update",
+    "api_self_update_preflight",
+    "api_self_update",
+    "api_mode_get",
+    "api_mode_set",
+}
+
+# Endpoint -> required mode. Filled in once we register the blueprints
+# below. Anything not in this map (and not in _ALWAYS_ON_ENDPOINTS) defaults
+# to master-only, which preserves backwards-compatible behavior for the
+# pre-existing /api/* endpoints in this file.
+_ROLE_BY_ENDPOINT: dict[str, _mode.Mode] = {}
+
+
+def _register_role_endpoint(endpoint: str, role: _mode.Mode) -> None:
+    _ROLE_BY_ENDPOINT[endpoint] = role
+
+
+@app.before_request
+def _enforce_mode_gate():
+    ep = request.endpoint or ""
+    if ep in _ALWAYS_ON_ENDPOINTS:
+        return None
+    expected = _ROLE_BY_ENDPOINT.get(ep, _mode.Mode.MASTER)
+    if _mode.get_mode() is expected:
+        return None
+    return (
+        jsonify(
+            error="endpoint disabled in current mode",
+            current_mode=_mode.get_mode().value,
+            required_mode=expected.value,
+            endpoint=ep,
+        ),
+        423,
+    )
+
+
+# Register the probe and master-probe blueprints. Probe-side imports are
+# deferred to keep `python app.py --help` cheap on a fresh install.
+import probe_routes as _probe_routes  # noqa: E402
+import master_probe_routes as _master_probe_routes  # noqa: E402
+
+app.register_blueprint(_probe_routes.probe_bp)
+app.register_blueprint(_master_probe_routes.master_probe_bp)
+
+# Bind each blueprint's endpoints to the role that should serve them.
+for _rule in app.url_map.iter_rules():
+    if _rule.endpoint.startswith("probe."):
+        _register_role_endpoint(_rule.endpoint, _mode.Mode.PROBE)
+    elif _rule.endpoint.startswith("master_probe."):
+        _register_role_endpoint(_rule.endpoint, _mode.Mode.MASTER)
 
 
 def _make_pc_session(auth: dict[str, Any]) -> requests.Session:
@@ -227,8 +294,18 @@ def _format_api_error(payload: Any) -> str:
 def index():
     # Disable browser caching so newly-deployed builds (which inline all
     # JS/CSS in the template) replace the old page on the very next request.
+    template = (
+        "probe.html"
+        if _mode.get_mode() is _mode.Mode.PROBE
+        else "index.html"
+    )
     resp = make_response(
-        render_template("index.html", version=__version__, build=BUILD)
+        render_template(
+            template,
+            version=__version__,
+            build=BUILD,
+            mode=_mode.get_mode().value,
+        )
     )
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     resp.headers["Pragma"] = "no-cache"
@@ -238,7 +315,25 @@ def index():
 
 @app.get("/api/version")
 def api_version():
-    return jsonify(version=__version__, build=BUILD)
+    return jsonify(version=__version__, build=BUILD, mode=_mode.get_mode().value)
+
+
+@app.get("/api/mode")
+def api_mode_get():
+    return jsonify(mode=_mode.get_mode().value)
+
+
+@app.post("/api/mode")
+def api_mode_set():
+    body = request.get_json(force=True, silent=True) or {}
+    target = body.get("mode")
+    if not target:
+        return jsonify(error="mode is required ('master' or 'probe')"), 400
+    try:
+        new_mode = _mode.set_mode(target)
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 400
+    return jsonify(mode=new_mode.value)
 
 
 # How long to remember the last successful upstream check so we don't hammer
@@ -2472,8 +2567,32 @@ def api_target_vcenter_create():
     )
 
 
+def _parse_cli_mode() -> str | None:
+    """Tiny argv scan so we don't drag argparse in for one flag.
+    `--mode probe` / `--mode master` flips the initial role at boot,
+    overriding NP4M_MODE which mode.py read at import time."""
+    argv = sys.argv[1:]
+    for i, arg in enumerate(argv):
+        if arg == "--mode" and i + 1 < len(argv):
+            return argv[i + 1]
+        if arg.startswith("--mode="):
+            return arg.split("=", 1)[1]
+    return None
+
+
 if __name__ == "__main__":
+    cli_mode = _parse_cli_mode()
+    if cli_mode:
+        try:
+            _mode.set_mode(cli_mode)
+        except ValueError as _exc:
+            print(f"warning: ignoring --mode {cli_mode!r}: {_exc}")
     host = os.environ.get("WEB_HOST", "127.0.0.1")
-    port = int(os.environ.get("WEB_PORT", "5000"))
+    default_port = "5050" if _mode.is_probe() else "5000"
+    port = int(os.environ.get("WEB_PORT", default_port))
     debug = os.environ.get("WEB_DEBUG") == "1"
+    print(
+        f"NP4M v{__version__} build {BUILD} starting in {_mode.get_mode().value.upper()} mode "
+        f"on http://{host}:{port}"
+    )
     app.run(host=host, port=port, debug=debug, threaded=True)
