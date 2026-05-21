@@ -1,0 +1,5 @@
+* text=auto
+
+# Shell scripts must keep LF line endings or bash chokes on \r.
+*.sh        text eol=lf
+install.sh  text eol=lf

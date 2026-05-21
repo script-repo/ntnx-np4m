@@ -102,6 +102,117 @@ ntnx-np4m/
 
 ## Install
 
+Pick whichever path matches the box you're on. All three end up with the same
+running app; the one-command installers just save you the manual steps.
+
+### Install on Linux (one command)
+
+For RHEL 9, Rocky 9, AlmaLinux 9, Oracle Linux 9. Needs root because it
+installs system packages, a service user, and a systemd unit. Re-running it
+upgrades NP4M in place (`git pull` + `pip install -U`).
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/script-repo/ntnx-np4m/main/install.sh | sudo bash
+```
+
+With overrides (any env var the script understands, e.g. bind to loopback
+only on port 8443):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/script-repo/ntnx-np4m/main/install.sh \
+  | sudo env NP4M_BIND=127.0.0.1 NP4M_PORT=8443 bash
+```
+
+What it does (idempotent):
+
+1. Drops a UBI 9 repo file at `/etc/yum.repos.d/ubi.repo` so unsubscribed RHEL
+   boxes can still `dnf install` (no-op if you already have RHEL repos or are
+   on Rocky / Alma / OL).
+2. `dnf install python3.12 python3.12-pip git openssl` (falls back to
+   `python3.11` if 3.12 isn't on this minor release).
+3. Creates a system user `np4m` and clones the repo to
+   `/home/np4m/ntnx-np4m`.
+4. Builds a virtualenv and installs `requirements.txt` plus `gunicorn`.
+5. **If `NP4M_BIND != 127.0.0.1`** (the default), generates a self-signed TLS
+   cert at `<install-dir>/tls/np4m.{crt,key}` with the host's FQDN and
+   primary IP in the SAN, then opens the port in `firewalld` if it's active.
+6. Writes `/etc/systemd/system/np4m.service` and runs
+   `systemctl enable --now np4m`.
+7. Prints the URL, the `journalctl -u np4m -f` hint, and the result of a
+   `curl` to `/api/version` so you can confirm the app is live.
+
+| Env var          | Default                                          | Purpose                                                |
+|------------------|--------------------------------------------------|--------------------------------------------------------|
+| `NP4M_BIND`      | `0.0.0.0`                                        | Bind address. Loopback => plain HTTP; anything else => HTTPS. |
+| `NP4M_PORT`      | `8443` when HTTPS, `8080` when loopback          | TCP port for gunicorn.                                 |
+| `NP4M_TLS_CERT`  | `<install-dir>/tls/np4m.crt` (self-signed)       | Bring your own cert (skips self-signed generation).    |
+| `NP4M_TLS_KEY`   | `<install-dir>/tls/np4m.key` (self-signed)       | Bring your own key.                                    |
+| `NP4M_USER`      | `np4m`                                           | Service user.                                          |
+| `NP4M_HOME`      | `/home/<user>`                                   | Service user home.                                     |
+| `NP4M_DIR`       | `<home>/ntnx-np4m`                               | Install directory.                                     |
+| `NP4M_REPO_URL`  | `https://github.com/script-repo/ntnx-np4m.git`   | Fork / mirror override.                                |
+| `NP4M_PY`        | `python3.12`                                     | Force a specific interpreter package.                  |
+| `NP4M_OPEN_FW`   | `yes`                                            | Set to `no` to skip the `firewall-cmd` step.           |
+| `NP4M_SYSTEMD`   | `yes`                                            | Set to `no` to skip writing the systemd unit.          |
+
+> The self-signed cert will trip a browser warning on first visit. To use a
+> trusted cert, copy it onto the box and re-run the installer with
+> `NP4M_TLS_CERT=/path/to/server.crt NP4M_TLS_KEY=/path/to/server.key`.
+
+Service management once installed:
+
+```bash
+systemctl status np4m
+systemctl restart np4m
+journalctl -u np4m -f
+```
+
+### Run on Windows (one command)
+
+No admin, no service, no persistence. Installs into your user profile and
+binds to `127.0.0.1` only. Closing the console window stops NP4M; re-launch
+it from the Start Menu or Desktop shortcut afterward.
+
+In a PowerShell window:
+
+```powershell
+iwr -useb https://raw.githubusercontent.com/script-repo/ntnx-np4m/main/install.ps1 | iex
+```
+
+What it does:
+
+1. Looks for Python 3.10+ via the `py` launcher, `python`, `python3`, or
+   `%LOCALAPPDATA%\Programs\Python\Python3xx\python.exe`. If none is found,
+   runs `winget install --id Python.Python.3.12 --scope user --silent` (no
+   UAC prompt because of `--scope user`).
+2. Downloads the repo as a zip from GitHub and extracts it to
+   `%LOCALAPPDATA%\NP4M\ntnx-np4m-main` (no `git` required).
+3. Creates a virtualenv at `%LOCALAPPDATA%\NP4M\.venv` and pip-installs
+   `requirements.txt` plus `waitress` (the Windows-friendly WSGI server).
+4. Writes a launcher at `%LOCALAPPDATA%\NP4M\np4m.cmd` that starts
+   `waitress-serve` bound to `127.0.0.1:5000` and pops the browser open at
+   that URL.
+5. Drops two shortcuts pointing at the launcher:
+   - `%APPDATA%\Microsoft\Windows\Start Menu\Programs\NP4M.lnk`
+   - `<your Desktop>\NP4M.lnk`
+   Both use the built-in `shell32.dll,17` server icon, so there's no asset
+   to ship or maintain.
+6. Launches NP4M for you. Set `$env:NP4M_NO_START='1'` before running the
+   one-liner if you don't want it auto-launched.
+
+| Env var          | Default                                                         | Purpose                                                  |
+|------------------|-----------------------------------------------------------------|----------------------------------------------------------|
+| `NP4M_PORT`      | `5000`                                                          | Listen port (always on `127.0.0.1`).                     |
+| `NP4M_NO_START`  | (unset)                                                         | Set to `1` to skip the auto-launch after install.        |
+| `NP4M_REPO_ZIP`  | `https://github.com/script-repo/ntnx-np4m/archive/.../main.zip` | Fork / mirror override.                                  |
+
+Re-running the one-liner is the upgrade path — it re-downloads the zip, blows
+away the old source tree, refreshes the venv, and rewrites the shortcuts.
+
+### Manual install (any OS)
+
+If you'd rather wire this up by hand:
+
 ```bash
 git clone https://github.com/script-repo/ntnx-np4m.git
 cd ntnx-np4m
