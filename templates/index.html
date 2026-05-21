@@ -270,6 +270,11 @@
       justify-content: space-between;
       background: #fafbfc;
     }
+    .log-card .log-head-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
     .log-card h2 {
       margin: 0;
     }
@@ -804,7 +809,10 @@ network_VLAN_1003 1003"></textarea>
     <section class="card log-card" id="card-log">
       <div class="log-head">
         <h2>Log</h2>
-        <span class="pill gray" id="log-count">0 lines</span>
+        <div class="log-head-actions">
+          <span class="pill gray" id="log-count">0 lines</span>
+          <button class="secondary" id="btn-download-log" disabled title="Download log as a text file">Download</button>
+        </div>
       </div>
       <div class="log-pane" id="log-pane"></div>
     </section>
@@ -828,11 +836,24 @@ network_VLAN_1003 1003"></textarea>
       el.querySelector(".text").textContent = text;
     }
 
+    // Parallel buffer of log entries kept so "Download log" can produce a
+    // clean text file without re-parsing the DOM (which would lose the
+    // ISO timestamp and any HTML-escaped characters).
+    const logBuffer = [];
+
+    function refreshLogCount() {
+      const n = logBuffer.length;
+      $("log-count").textContent = n + (n === 1 ? " line" : " lines");
+      const btn = $("btn-download-log");
+      if (btn) btn.disabled = n === 0;
+    }
+
     function addLog(level, msg) {
       const pane = $("log-pane");
       const line = document.createElement("span");
       line.className = "log-line " + level;
-      const ts = new Date().toLocaleTimeString();
+      const now = new Date();
+      const ts = now.toLocaleTimeString();
       const tsSpan = document.createElement("span");
       tsSpan.className = "ts";
       tsSpan.textContent = "[" + ts + "]";
@@ -844,8 +865,44 @@ network_VLAN_1003 1003"></textarea>
       line.appendChild(document.createElement("br"));
       pane.appendChild(line);
       pane.scrollTop = pane.scrollHeight;
-      const count = pane.querySelectorAll(".log-line").length;
-      $("log-count").textContent = count + (count === 1 ? " line" : " lines");
+      logBuffer.push({ iso: now.toISOString(), ts, level: level || "info", msg: String(msg ?? "") });
+      refreshLogCount();
+    }
+
+    function clearLog() {
+      $("log-pane").innerHTML = "";
+      logBuffer.length = 0;
+      refreshLogCount();
+    }
+
+    function downloadLog() {
+      if (logBuffer.length === 0) return;
+      // Pad the level so columns line up in a plain-text viewer / grep.
+      const padLevel = (lvl) => (lvl + "      ").slice(0, 6);
+      const header = [
+        "# NP4M log",
+        "# generated: " + new Date().toISOString(),
+        "# lines: " + logBuffer.length,
+        "",
+      ].join("\n");
+      const body = logBuffer
+        .map((e) => `${e.iso}  ${padLevel(e.level).toUpperCase()}  ${e.msg}`)
+        .join("\n");
+      const blob = new Blob([header + body + "\n"], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      const stamp = new Date()
+        .toISOString()
+        .replace(/[:.]/g, "-")
+        .replace(/Z$/, "");
+      a.href = url;
+      a.download = `np4m-log-${stamp}.txt`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      // Give the browser a moment to start the download before we revoke
+      // the object URL (Firefox will silently cancel if revoked too soon).
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
     }
 
     async function postJson(url, payload) {
@@ -1982,10 +2039,9 @@ network_VLAN_1003 1003"></textarea>
       $("vs-select").addEventListener("change", updateCreateButton);
       $("networks-input").addEventListener("input", parseNetworks);
       $("btn-create").addEventListener("click", doCreate);
-      $("btn-clear-log").addEventListener("click", () => {
-        $("log-pane").innerHTML = "";
-        $("log-count").textContent = "0 lines";
-      });
+      $("btn-clear-log").addEventListener("click", clearLog);
+      $("btn-download-log").addEventListener("click", downloadLog);
+      refreshLogCount();
 
       document.querySelectorAll('input[name="src-kind"]').forEach((el) => {
         el.addEventListener("change", applySrcVisibility);
