@@ -1,24 +1,38 @@
 #requires -Version 5.1
 <#
 .SYNOPSIS
-    NP4M one-shot installer for Windows. No admin required.
+    NP4M self-contained Windows installer. No admin, no Start Menu, no
+    %LOCALAPPDATA% \u2014 everything lives in the directory you run this from.
 
 .DESCRIPTION
-    - Installs Python 3.12 via winget (user scope) if no Python 3.10+ is found.
-    - Downloads the repo as a zip (no git required).
-    - Creates a virtualenv under %LOCALAPPDATA%\NP4M.
-    - Installs waitress and project dependencies.
-    - Writes a launcher (np4m.cmd) plus Start Menu and Desktop shortcuts.
-    - Binds to 127.0.0.1:5000 only. Closing the console window stops the app.
+    Bundles Python 3.12 (embeddable distribution) into ./python/ and the repo
+    into ./ntnx-np4m-main/, then writes np4m.cmd + _run_np4m.py at the top of
+    the folder. To uninstall: delete the folder.
+
+    Folder layout after install:
+
+        <install dir>/
+        ├── install.ps1                 (if you downloaded it; optional)
+        ├── np4m.cmd                    launcher (double-click to run)
+        ├── _run_np4m.py                tiny waitress bootstrap
+        ├── python/                     embedded Python 3.12 + pip + site-packages
+        └── ntnx-np4m-main/             repo source
+
+    Re-running upgrades the source tree and dependencies in place.
 
 .NOTES
-    Usage:
+    Usage (PowerShell, no admin):
+
+        mkdir C:\Tools\NP4M
+        cd C:\Tools\NP4M
         iwr -useb https://raw.githubusercontent.com/script-repo/ntnx-np4m/main/install.ps1 | iex
 
     Env overrides:
-        $env:NP4M_PORT      Listen port (default 5000)
-        $env:NP4M_NO_START  Set to '1' to skip auto-launch after install
-        $env:NP4M_REPO_ZIP  Override the source zip URL
+        $env:NP4M_DIR           Target install dir (default: current directory).
+        $env:NP4M_PORT          Listen port (default 5000).
+        $env:NP4M_NO_START      Set to '1' to skip auto-launch after install.
+        $env:NP4M_PY_VERSION    Python embed version (default 3.12.7).
+        $env:NP4M_REPO_ZIP      Source zip URL override.
 #>
 
 $ErrorActionPreference = 'Stop'
@@ -28,165 +42,139 @@ function Write-Log { param([string]$Msg) Write-Host "[np4m] $Msg" -ForegroundCol
 function Write-Err { param([string]$Msg) Write-Host "[np4m] $Msg" -ForegroundColor Red }
 
 # --- Config ---------------------------------------------------------------
-$InstallDir = Join-Path $env:LOCALAPPDATA 'NP4M'
-$RepoZipUrl = if ($env:NP4M_REPO_ZIP) { $env:NP4M_REPO_ZIP } else { 'https://github.com/script-repo/ntnx-np4m/archive/refs/heads/main.zip' }
-$RepoDirName = 'ntnx-np4m-main'
-$WebPort = if ($env:NP4M_PORT) { [int]$env:NP4M_PORT } else { 5000 }
+$InstallDir = if ($env:NP4M_DIR) { $env:NP4M_DIR } else { (Get-Location).Path }
+$InstallDir = [System.IO.Path]::GetFullPath($InstallDir)
+$PyVersion  = if ($env:NP4M_PY_VERSION) { $env:NP4M_PY_VERSION } else { '3.12.7' }
+$WebPort    = if ($env:NP4M_PORT)       { [int]$env:NP4M_PORT } else { 5000 }
+$RepoZipUrl = if ($env:NP4M_REPO_ZIP)   { $env:NP4M_REPO_ZIP } else { 'https://github.com/script-repo/ntnx-np4m/archive/refs/heads/main.zip' }
 
-New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-
-# --- 1. Python detection / install ----------------------------------------
-function Find-Python {
-    if (Get-Command py -ErrorAction SilentlyContinue) {
-        foreach ($ver in '3.12','3.11','3.10') {
-            try {
-                $out = & py "-$ver" --version 2>$null
-                if ($LASTEXITCODE -eq 0) {
-                    return [PSCustomObject]@{ Exe = 'py'; PreArgs = @("-$ver"); Version = $ver }
-                }
-            } catch {}
-        }
-    }
-    foreach ($exe in 'python','python3') {
-        if (Get-Command $exe -ErrorAction SilentlyContinue) {
-            try {
-                $out = & $exe --version 2>$null
-                if ($LASTEXITCODE -eq 0 -and $out -match 'Python (\d+)\.(\d+)') {
-                    $major = [int]$Matches[1]; $minor = [int]$Matches[2]
-                    if ($major -eq 3 -and $minor -ge 10) {
-                        return [PSCustomObject]@{ Exe = $exe; PreArgs = @(); Version = "$major.$minor" }
-                    }
-                }
-            } catch {}
-        }
-    }
-    $pyRoot = Join-Path $env:LOCALAPPDATA 'Programs\Python'
-    if (Test-Path $pyRoot) {
-        $candidates = Get-ChildItem $pyRoot -Directory -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match '^Python3(\d+)$' } |
-            Sort-Object Name -Descending
-        foreach ($c in $candidates) {
-            $exe = Join-Path $c.FullName 'python.exe'
-            if (Test-Path $exe) {
-                try {
-                    $out = & $exe --version 2>$null
-                    if ($LASTEXITCODE -eq 0 -and $out -match 'Python (\d+)\.(\d+)') {
-                        $major = [int]$Matches[1]; $minor = [int]$Matches[2]
-                        if ($major -eq 3 -and $minor -ge 10) {
-                            return [PSCustomObject]@{ Exe = $exe; PreArgs = @(); Version = "$major.$minor" }
-                        }
-                    }
-                } catch {}
-            }
-        }
-    }
-    return $null
-}
-
-$py = Find-Python
-if (-not $py) {
-    Write-Log "Python 3.10+ not found. Installing Python 3.12 via winget (user scope)..."
-    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-        Write-Err "winget is not available on this box. Install Python 3.10+ from https://www.python.org/downloads/ and re-run."
+$arch = $env:PROCESSOR_ARCHITECTURE
+switch ($arch) {
+    'AMD64' { $pyArchTag = 'amd64' }
+    'ARM64' { $pyArchTag = 'arm64' }
+    default {
+        Write-Err "Unsupported CPU architecture: $arch. Need AMD64 or ARM64."
         exit 1
     }
-    & winget install --id Python.Python.3.12 --scope user --silent --accept-package-agreements --accept-source-agreements
+}
+
+$PyEmbedUrl = "https://www.python.org/ftp/python/$PyVersion/python-$PyVersion-embed-$pyArchTag.zip"
+$GetPipUrl  = 'https://bootstrap.pypa.io/get-pip.py'
+
+$PythonDir  = Join-Path $InstallDir 'python'
+$PythonExe  = Join-Path $PythonDir 'python.exe'
+$SrcDirName = 'ntnx-np4m-main'
+$SrcDir     = Join-Path $InstallDir $SrcDirName
+$Launcher   = Join-Path $InstallDir 'np4m.cmd'
+$RunPy      = Join-Path $InstallDir '_run_np4m.py'
+
+Write-Log "Install dir:   $InstallDir"
+Write-Log "Python version: $PyVersion ($pyArchTag)"
+Write-Log "Listen port:    127.0.0.1:$WebPort"
+
+if (-not (Test-Path $InstallDir)) {
+    New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+}
+
+# --- 1. Embedded Python ---------------------------------------------------
+if (-not (Test-Path $PythonExe)) {
+    $pyZip = Join-Path $InstallDir '.tmp_python.zip'
+    Write-Log "Downloading embeddable Python from $PyEmbedUrl ..."
+    try {
+        Invoke-WebRequest -Uri $PyEmbedUrl -OutFile $pyZip -UseBasicParsing
+    } catch {
+        Write-Err "Download failed: $($_.Exception.Message)"
+        Write-Err "If $PyVersion isn't published yet, set `$env:NP4M_PY_VERSION to a known one (e.g. 3.12.7)."
+        exit 1
+    }
+    if (Test-Path $PythonDir) { Remove-Item -Recurse -Force $PythonDir }
+    New-Item -ItemType Directory -Force -Path $PythonDir | Out-Null
+    Write-Log "Extracting Python to $PythonDir ..."
+    Expand-Archive -Path $pyZip -DestinationPath $PythonDir -Force
+    Remove-Item $pyZip -Force
+
+    # Enable site-packages so pip works on the embeddable distribution.
+    $pthFile = Get-ChildItem -Path $PythonDir -Filter 'python*._pth' -File | Select-Object -First 1
+    if (-not $pthFile) {
+        Write-Err "Could not find python*._pth in $PythonDir"
+        exit 1
+    }
+    $pthContent = Get-Content $pthFile.FullName
+    $pthContent = $pthContent | ForEach-Object { if ($_ -match '^\s*#\s*import site') { 'import site' } else { $_ } }
+    Set-Content -Path $pthFile.FullName -Value $pthContent -Encoding ASCII
+
+    Write-Log "Bootstrapping pip..."
+    $getPip = Join-Path $PythonDir 'get-pip.py'
+    Invoke-WebRequest -Uri $GetPipUrl -OutFile $getPip -UseBasicParsing
+    & $PythonExe $getPip --no-warn-script-location --disable-pip-version-check
     if ($LASTEXITCODE -ne 0) {
-        Write-Err "winget install failed (exit $LASTEXITCODE)."
+        Write-Err "pip bootstrap failed."
         exit 1
     }
-    $py = Find-Python
-    if (-not $py) {
-        Write-Err "winget reported success but no Python 3.10+ was found afterward."
-        Write-Err "Open a new PowerShell window and re-run this installer."
-        exit 1
-    }
-}
-Write-Log "Using Python $($py.Version): $($py.Exe) $($py.PreArgs -join ' ')"
-
-# --- 2. Download repo zip --------------------------------------------------
-$zipPath = Join-Path $InstallDir 'np4m.zip'
-Write-Log "Downloading $RepoZipUrl ..."
-Invoke-WebRequest -Uri $RepoZipUrl -OutFile $zipPath -UseBasicParsing
-
-$srcDir = Join-Path $InstallDir $RepoDirName
-if (Test-Path $srcDir) {
-    Write-Log "Removing previous source tree at $srcDir ..."
-    Remove-Item -Recurse -Force $srcDir
-}
-Write-Log "Extracting to $InstallDir ..."
-Expand-Archive -Path $zipPath -DestinationPath $InstallDir -Force
-Remove-Item $zipPath -Force
-
-# --- 3. Virtualenv + dependencies -----------------------------------------
-$venvDir = Join-Path $InstallDir '.venv'
-$venvPy  = Join-Path $venvDir 'Scripts\python.exe'
-
-if (-not (Test-Path $venvPy)) {
-    Write-Log "Creating virtualenv at $venvDir ..."
-    $venvArgs = $py.PreArgs + @('-m','venv',$venvDir)
-    & $py.Exe @venvArgs
-    if ($LASTEXITCODE -ne 0) { Write-Err "venv creation failed."; exit 1 }
+    Remove-Item $getPip -Force
+} else {
+    Write-Log "Python already present at $PythonDir, skipping download."
 }
 
-Write-Log "Installing Python dependencies (this may take a minute)..."
-& $venvPy -m pip install --upgrade pip --quiet
-& $venvPy -m pip install -r (Join-Path $srcDir 'requirements.txt') --quiet
-& $venvPy -m pip install waitress --quiet
+# --- 2. Source tree --------------------------------------------------------
+$repoZip = Join-Path $InstallDir '.tmp_repo.zip'
+Write-Log "Downloading source zip from $RepoZipUrl ..."
+Invoke-WebRequest -Uri $RepoZipUrl -OutFile $repoZip -UseBasicParsing
 
-# --- 4. Launcher .cmd ------------------------------------------------------
-$launcher = Join-Path $InstallDir 'np4m.cmd'
+if (Test-Path $SrcDir) {
+    Write-Log "Removing previous source tree at $SrcDir ..."
+    Remove-Item -Recurse -Force $SrcDir
+}
+Write-Log "Extracting source to $InstallDir ..."
+Expand-Archive -Path $repoZip -DestinationPath $InstallDir -Force
+Remove-Item $repoZip -Force
+
+# --- 3. Python deps -------------------------------------------------------
+Write-Log "Installing Python dependencies (this may take a minute) ..."
+& $PythonExe -m pip install --upgrade pip --no-warn-script-location --disable-pip-version-check --quiet
+& $PythonExe -m pip install -r (Join-Path $SrcDir 'requirements.txt') --no-warn-script-location --disable-pip-version-check --quiet
+& $PythonExe -m pip install waitress --no-warn-script-location --disable-pip-version-check --quiet
+
+# --- 4. Bootstrap runner + launcher ---------------------------------------
+$runContent = @'
+import os
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SRC  = os.path.join(HERE, 'ntnx-np4m-main')
+sys.path.insert(0, SRC)
+os.chdir(SRC)
+
+from waitress import serve
+from app import app
+
+host = os.environ.get('WEB_HOST', '127.0.0.1')
+port = int(os.environ.get('WEB_PORT', '5000'))
+print(f'[np4m] serving on http://{host}:{port}/  (Ctrl+C to stop)')
+serve(app, host=host, port=port)
+'@
+Set-Content -Path $RunPy -Value $runContent -Encoding ASCII
+
 $launcherContent = @"
 @echo off
 title NP4M
-cd /d "$srcDir"
 set WEB_HOST=127.0.0.1
 set WEB_PORT=$WebPort
 start "" http://127.0.0.1:$WebPort/
-"$venvDir\Scripts\waitress-serve.exe" --host=127.0.0.1 --port=$WebPort app:app
+"%~dp0python\python.exe" "%~dp0_run_np4m.py"
 "@
-Set-Content -Path $launcher -Value $launcherContent -Encoding ASCII
-Write-Log "Wrote launcher: $launcher"
+Set-Content -Path $Launcher -Value $launcherContent -Encoding ASCII
+Write-Log "Wrote launcher: $Launcher"
 
-# --- 5. Shortcuts (Start Menu + Desktop) ----------------------------------
-function New-NP4MShortcut {
-    param(
-        [string]$Path,
-        [string]$Target,
-        [string]$WorkingDir,
-        [string]$IconLocation
-    )
-    $wsh = New-Object -ComObject WScript.Shell
-    $lnk = $wsh.CreateShortcut($Path)
-    $lnk.TargetPath       = $Target
-    $lnk.WorkingDirectory = $WorkingDir
-    $lnk.IconLocation     = $IconLocation
-    $lnk.Description      = 'Launch NP4M'
-    $lnk.WindowStyle      = 1
-    $lnk.Save()
-}
-
-$icon = "$env:SystemRoot\System32\SHELL32.dll,17"
-$startMenuDir = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'
-if (-not (Test-Path $startMenuDir)) {
-    New-Item -ItemType Directory -Force -Path $startMenuDir | Out-Null
-}
-$startLnk   = Join-Path $startMenuDir 'NP4M.lnk'
-$desktopDir = [Environment]::GetFolderPath('Desktop')
-$desktopLnk = Join-Path $desktopDir 'NP4M.lnk'
-
-New-NP4MShortcut -Path $startLnk   -Target $launcher -WorkingDir $InstallDir -IconLocation $icon
-New-NP4MShortcut -Path $desktopLnk -Target $launcher -WorkingDir $InstallDir -IconLocation $icon
-Write-Log "Shortcuts created (Start Menu + Desktop)."
-
-# --- 6. Optional auto-launch ----------------------------------------------
+# --- 5. Optional auto-launch ----------------------------------------------
 if ($env:NP4M_NO_START -ne '1') {
     Write-Log "Launching NP4M ..."
-    Start-Process -FilePath $launcher
+    Start-Process -FilePath $Launcher -WorkingDirectory $InstallDir
 }
 
 Write-Log ""
-Write-Log "NP4M installed at $InstallDir"
-Write-Log "  Launch:  Start Menu -> NP4M   (or Desktop shortcut)"
-Write-Log "  URL:     http://127.0.0.1:$WebPort/"
-Write-Log "  Stop:    close the NP4M console window"
+Write-Log "NP4M installed (self-contained) at $InstallDir"
+Write-Log "  Launch:    double-click np4m.cmd in that folder"
+Write-Log "  URL:       http://127.0.0.1:$WebPort/"
+Write-Log "  Stop:      close the NP4M console window"
+Write-Log "  Uninstall: delete the folder"

@@ -167,47 +167,68 @@ systemctl restart np4m
 journalctl -u np4m -f
 ```
 
-### Run on Windows (one command)
+### Run on Windows (one command, self-contained)
 
-No admin, no service, no persistence. Installs into your user profile and
-binds to `127.0.0.1` only. Closing the console window stops NP4M; re-launch
-it from the Start Menu or Desktop shortcut afterward.
+No admin, no service, no persistence, nothing outside the folder you run it
+in. The installer drops an embeddable Python 3.12 inside the folder, so the
+box doesn't even need Python pre-installed. **To uninstall: delete the
+folder.**
 
 In a PowerShell window:
 
 ```powershell
+mkdir C:\Tools\NP4M
+cd C:\Tools\NP4M
 iwr -useb https://raw.githubusercontent.com/script-repo/ntnx-np4m/main/install.ps1 | iex
 ```
 
+(Pick whatever folder you like — `C:\Tools\NP4M` is just an example. You can
+also keep it on a USB stick or under your home directory.)
+
 What it does:
 
-1. Looks for Python 3.10+ via the `py` launcher, `python`, `python3`, or
-   `%LOCALAPPDATA%\Programs\Python\Python3xx\python.exe`. If none is found,
-   runs `winget install --id Python.Python.3.12 --scope user --silent` (no
-   UAC prompt because of `--scope user`).
-2. Downloads the repo as a zip from GitHub and extracts it to
-   `%LOCALAPPDATA%\NP4M\ntnx-np4m-main` (no `git` required).
-3. Creates a virtualenv at `%LOCALAPPDATA%\NP4M\.venv` and pip-installs
-   `requirements.txt` plus `waitress` (the Windows-friendly WSGI server).
-4. Writes a launcher at `%LOCALAPPDATA%\NP4M\np4m.cmd` that starts
-   `waitress-serve` bound to `127.0.0.1:5000` and pops the browser open at
-   that URL.
-5. Drops two shortcuts pointing at the launcher:
-   - `%APPDATA%\Microsoft\Windows\Start Menu\Programs\NP4M.lnk`
-   - `<your Desktop>\NP4M.lnk`
-   Both use the built-in `shell32.dll,17` server icon, so there's no asset
-   to ship or maintain.
-6. Launches NP4M for you. Set `$env:NP4M_NO_START='1'` before running the
-   one-liner if you don't want it auto-launched.
+1. Downloads the **embeddable Python 3.12** distribution from python.org and
+   unzips it to `./python/`. Uncomments `import site` in `python*._pth` so
+   pip will work on the embeddable build.
+2. Downloads `get-pip.py` and bootstraps pip into `./python/Lib/site-packages/`.
+3. Downloads the repo zip from GitHub and extracts it to `./ntnx-np4m-main/`
+   (no `git` required).
+4. Runs `pip install -r requirements.txt waitress` against the embedded
+   Python.
+5. Writes `np4m.cmd` and `_run_np4m.py` at the top of the folder. The runner
+   adds `./ntnx-np4m-main` to `sys.path`, imports the Flask app, and serves
+   it with waitress on `127.0.0.1:5000`. The launcher pops your browser at
+   that URL and starts the server.
+6. Launches NP4M for you. Set `$env:NP4M_NO_START='1'` before the one-liner
+   if you don't want auto-launch.
 
-| Env var          | Default                                                         | Purpose                                                  |
-|------------------|-----------------------------------------------------------------|----------------------------------------------------------|
-| `NP4M_PORT`      | `5000`                                                          | Listen port (always on `127.0.0.1`).                     |
-| `NP4M_NO_START`  | (unset)                                                         | Set to `1` to skip the auto-launch after install.        |
-| `NP4M_REPO_ZIP`  | `https://github.com/script-repo/ntnx-np4m/archive/.../main.zip` | Fork / mirror override.                                  |
+Folder layout after install:
 
-Re-running the one-liner is the upgrade path — it re-downloads the zip, blows
-away the old source tree, refreshes the venv, and rewrites the shortcuts.
+```
+C:\Tools\NP4M\
+├── install.ps1            (only if you saved it; not required)
+├── np4m.cmd               <-- double-click to launch
+├── _run_np4m.py
+├── python\                embedded Python + pip + site-packages
+└── ntnx-np4m-main\        repo source
+```
+
+| Env var             | Default                                                         | Purpose                                                                |
+|---------------------|-----------------------------------------------------------------|------------------------------------------------------------------------|
+| `NP4M_DIR`          | current directory                                               | Override the install folder.                                           |
+| `NP4M_PORT`         | `5000`                                                          | Listen port (always on `127.0.0.1`).                                   |
+| `NP4M_NO_START`     | (unset)                                                         | Set to `1` to skip auto-launch after install.                          |
+| `NP4M_PY_VERSION`   | `3.12.7`                                                        | Embeddable Python version pulled from python.org.                      |
+| `NP4M_REPO_ZIP`     | `https://github.com/script-repo/ntnx-np4m/archive/.../main.zip` | Fork / mirror override.                                                |
+
+Re-running the one-liner from the same folder is the upgrade path — it
+re-downloads the source zip, blows away `./ntnx-np4m-main/`, and refreshes
+the Python dependencies. Python itself is only downloaded the first time.
+
+> Why embeddable Python: it's a ~12 MB unzip with no installer and no
+> registry entries. The folder is fully relocatable; copy it to another
+> Windows box and it runs there too. There's no system Python to clash with
+> and nothing to uninstall via Control Panel.
 
 ### Manual install (any OS)
 

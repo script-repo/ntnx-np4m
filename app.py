@@ -48,7 +48,7 @@ from flask import (
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 __version__ = "0.2.0"
-BUILD = 4   # bump on every commit
+BUILD = 5   # bump on every commit
 
 app = Flask(__name__)
 
