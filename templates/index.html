@@ -1287,7 +1287,18 @@ network_VLAN_1003 1003"></textarea>
       kind: null,
       rows: [],
       selected: new Set(),
+      maxRender: 2000,  // cap visible rows; "show all" lifts this cap.
     };
+
+    // Tiny debounce helper - used for the filter input so we don't
+    // rebuild 500+ rows on every keystroke.
+    function debounce(fn, ms) {
+      let t = null;
+      return function (...args) {
+        if (t) clearTimeout(t);
+        t = setTimeout(() => fn.apply(this, args), ms);
+      };
+    }
 
     function getSrcKind() {
       const r = document.querySelector('input[name="src-kind"]:checked');
@@ -1477,10 +1488,14 @@ network_VLAN_1003 1003"></textarea>
     function renderSourceTable() {
       const tbody = $("src-tbody");
       tbody.innerHTML = "";
+      const frag = document.createDocumentFragment();
       const filterRaw = ($("src-filter").value || "").trim().toLowerCase();
       const existingInTarget = getTargetExistingNames();
       let visibleCount = 0;
       let importable = 0;
+      let rendered = 0;
+      let truncated = false;
+      const cap = sourceState.maxRender;
       sourceState.rows.forEach((row, idx) => {
         const id = String(idx);
         const haystack = [
@@ -1489,6 +1504,15 @@ network_VLAN_1003 1003"></textarea>
         ].map((x) => (x === null || x === undefined ? "" : String(x)).toLowerCase()).join(" ");
         if (filterRaw && !haystack.includes(filterRaw)) return;
         visibleCount++;
+        if (rendered >= cap) {
+          truncated = true;
+          if (!row || (row.vlan !== null && row.vlan !== undefined && typeof row.vlan === "number"
+                       && row.vlan >= 0 && row.vlan <= 4094)) {
+            importable++;
+          }
+          return;
+        }
+        rendered++;
 
         const skipReason = (() => {
           if (row.vlan === null || row.vlan === undefined) {
@@ -1587,10 +1611,41 @@ network_VLAN_1003 1003"></textarea>
         tr.appendChild(tdIp);
 
         if (!skipReason) importable++;
-        tbody.appendChild(tr);
+        frag.appendChild(tr);
       });
-      $("src-meta").textContent =
+      tbody.appendChild(frag);
+
+      const meta = $("src-meta");
+      let metaText =
         `${visibleCount} visible · ${importable} importable · ${sourceState.selected.size} selected`;
+      if (truncated) {
+        metaText += ` · showing first ${cap} row(s)`;
+      }
+      meta.textContent = metaText;
+
+      // "Show all" affordance appears only when we truncated the
+      // initial render. Clicking it lifts the cap and re-renders.
+      let showAllBtn = document.getElementById("src-show-all");
+      if (truncated) {
+        if (!showAllBtn) {
+          showAllBtn = document.createElement("button");
+          showAllBtn.id = "src-show-all";
+          showAllBtn.type = "button";
+          showAllBtn.className = "ghost";
+          showAllBtn.style.marginLeft = "8px";
+          showAllBtn.textContent = `Show all (${visibleCount})`;
+          showAllBtn.addEventListener("click", () => {
+            sourceState.maxRender = Number.POSITIVE_INFINITY;
+            renderSourceTable();
+          });
+          meta.parentNode.appendChild(showAllBtn);
+        } else {
+          showAllBtn.textContent = `Show all (${visibleCount})`;
+          showAllBtn.style.display = "";
+        }
+      } else if (showAllBtn) {
+        showAllBtn.style.display = "none";
+      }
       updateImportButton();
     }
 
@@ -2072,7 +2127,7 @@ network_VLAN_1003 1003"></textarea>
       $("src-token").addEventListener("keydown", (e) => {
         if (e.key === "Enter") doSourceConnect();
       });
-      $("src-filter").addEventListener("input", renderSourceTable);
+      $("src-filter").addEventListener("input", debounce(renderSourceTable, 180));
       $("btn-src-select-all").addEventListener("click", selectAllVisible);
       $("btn-src-clear").addEventListener("click", clearSelection);
       $("btn-src-import").addEventListener("click", importSelectedToTextarea);

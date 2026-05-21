@@ -257,6 +257,28 @@ update — no harm done.
 > + `StartLimitBurst=5` (rate-limited so a crash loop doesn't spin
 > forever).
 
+#### Scaling to hundreds of port groups
+
+NP4M's vSphere walks (source inventory, target switch/host/port-group
+listing, duplicate-name preflight before create) use **PropertyCollector
+bulk fetches** rather than per-object attribute access, so a vCenter
+with hundreds of DVPortgroups or VSS port groups across dozens of hosts
+still returns in a couple of seconds rather than minutes.
+
+A few extra knobs worth knowing about if you push it harder:
+
+- **VDS batched create timeout** scales automatically with the batch
+  size (`max(task_timeout, min(900, 60 + 2 * N_specs))`, capped at
+  15 minutes). Pass `task_timeout` in the create-request body to raise
+  the floor.
+- **gunicorn worker timeout** is already 300 s in the install.sh unit.
+  For truly huge environments (thousands of port groups) bump it: edit
+  `/etc/systemd/system/np4m.service`, raise `--timeout 600`, then
+  `sudo systemctl daemon-reload && sudo systemctl restart np4m`.
+- **Source table filter** is debounced (180 ms) and capped at 2000 rows
+  on first render; a "Show all (N)" button appears next to the row
+  counter when the result is larger.
+
 ### Run on Windows (one command, self-contained)
 
 No admin, no service, no persistence, nothing outside the folder you run it
