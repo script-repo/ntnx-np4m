@@ -340,6 +340,13 @@ fi
 
 if [[ "$NP4M_SYSTEMD" == "yes" && "$HAS_SYSTEMD" == "yes" ]]; then
   log "Installing systemd unit /etc/systemd/system/np4m.service..."
+  # IMPORTANT: single worker, multiple threads. NP4M keeps target/source
+  # session credentials in in-process dicts (TARGET_VCENTER_SESSIONS,
+  # SOURCE_SESSIONS, SESSIONS), so running multiple worker *processes*
+  # would scatter tokens across them - the very next request after
+  # /connect would hit a different worker and 401 with "not connected
+  # to a target vCenter". The app's hot paths are I/O-bound (waiting on
+  # vCenter / Prism Central), so threads give plenty of concurrency.
   cat > /etc/systemd/system/np4m.service <<EOF
 [Unit]
 Description=NP4M
@@ -352,7 +359,7 @@ User=${NP4M_USER}
 WorkingDirectory=${NP4M_DIR}
 Environment=WEB_HOST=${NP4M_BIND}
 Environment=WEB_PORT=${NP4M_PORT}
-ExecStart=${NP4M_DIR}/.venv/bin/gunicorn --workers 2 --bind ${NP4M_BIND}:${NP4M_PORT} ${TLS_ARGS} app:app
+ExecStart=${NP4M_DIR}/.venv/bin/gunicorn --workers 1 --threads 4 --bind ${NP4M_BIND}:${NP4M_PORT} ${TLS_ARGS} app:app
 Restart=on-failure
 RestartSec=3
 
@@ -365,7 +372,7 @@ EOF
 elif [[ "$NP4M_SYSTEMD" == "yes" && "$HAS_SYSTEMD" == "no" ]]; then
   warn "systemd not detected on this distro. NP4M was installed but no service was registered."
   warn "Start it manually with:"
-  warn "  sudo -u ${NP4M_USER} ${NP4M_DIR}/.venv/bin/gunicorn --workers 2 \\"
+  warn "  sudo -u ${NP4M_USER} ${NP4M_DIR}/.venv/bin/gunicorn --workers 1 --threads 4 \\"
   warn "    --bind ${NP4M_BIND}:${NP4M_PORT} ${TLS_ARGS} app:app"
 fi
 

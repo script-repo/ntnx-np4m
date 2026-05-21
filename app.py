@@ -50,7 +50,7 @@ from flask import (
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 __version__ = "0.2.0"
-BUILD = 7   # bump on every commit
+BUILD = 8   # bump on every commit
 
 app = Flask(__name__)
 
@@ -1523,7 +1523,7 @@ def api_target_vcenter_switches():
     body = request.get_json(force=True, silent=True) or {}
     sess = _get_target_vcenter_session(body.get("target_token"))
     if not sess:
-        return jsonify(error="not connected to a target vCenter"), 401
+        return jsonify(error="target vCenter session not found (expired, or NP4M restarted) - reconnect in step 1"), 401
     switch_kind = (body.get("switch_kind") or "").strip().lower()
     if switch_kind not in {"vss", "vds"}:
         return jsonify(error="switch_kind must be 'vss' or 'vds'"), 400
@@ -1590,7 +1590,7 @@ def api_target_vcenter_hosts():
     body = request.get_json(force=True, silent=True) or {}
     sess = _get_target_vcenter_session(body.get("target_token"))
     if not sess:
-        return jsonify(error="not connected to a target vCenter"), 401
+        return jsonify(error="target vCenter session not found (expired, or NP4M restarted) - reconnect in step 1"), 401
     vswitch_name = (body.get("vswitch_name") or "").strip()
     try:
         _, Disconnect, vim, si = _target_vcenter_connect_si(sess)
@@ -1718,7 +1718,7 @@ def api_target_vcenter_portgroups():
     body = request.get_json(force=True, silent=True) or {}
     sess = _get_target_vcenter_session(body.get("target_token"))
     if not sess:
-        return jsonify(error="not connected to a target vCenter"), 401
+        return jsonify(error="target vCenter session not found (expired, or NP4M restarted) - reconnect in step 1"), 401
     switch_kind = (body.get("switch_kind") or "").strip().lower()
     switch_name = (body.get("switch_name") or "").strip()
     hosts = body.get("hosts") or []
@@ -1787,7 +1787,7 @@ def api_target_vcenter_create():
     body = request.get_json(force=True, silent=True) or {}
     sess = _get_target_vcenter_session(body.get("target_token"))
     if not sess:
-        return jsonify(error="not connected to a target vCenter"), 401
+        return jsonify(error="target vCenter session not found (expired, or NP4M restarted) - reconnect in step 1"), 401
     switch_kind = (body.get("switch_kind") or "").strip().lower()
     switch_name = (body.get("switch_name") or "").strip()
     hosts = body.get("hosts") or []
