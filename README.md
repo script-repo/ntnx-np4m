@@ -22,6 +22,49 @@ constants live at the top of `app.py` and are bumped on every commit.
 
 ---
 
+## Quick install
+
+Pick the line that matches your machine, paste it into a terminal, and the
+installer does the rest — downloads NP4M, sets up Python, and starts it.
+Then open the URL it prints at the end.
+
+### Linux (one line, runs as a background service)
+
+Works on Debian, Ubuntu, RHEL/Rocky/Alma, Fedora, openSUSE, Arch, Alpine,
+and similar. Needs `sudo` because it installs a service that starts NP4M
+on boot. When bound to anything other than loopback, it auto-generates a
+self-signed certificate and serves over HTTPS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/script-repo/ntnx-np4m/main/install.sh | sudo bash
+```
+
+When it finishes, it prints the URL (e.g. `https://<your-host>:8443/`).
+Re-run the same line later to upgrade in place, or just click the green
+"Update available" pill in the app's header.
+
+### Windows (one line, runs as a local app)
+
+No admin rights, no service, nothing installed system-wide. Everything
+lives inside the folder you run it from, including a bundled Python — so
+the machine doesn't even need Python installed. To uninstall, delete the
+folder.
+
+Open PowerShell and run:
+
+```powershell
+mkdir C:\Tools\NP4M; cd C:\Tools\NP4M; iwr -useb https://raw.githubusercontent.com/script-repo/ntnx-np4m/main/install.ps1 | iex
+```
+
+(Any folder works — `C:\Tools\NP4M` is just an example.) After the
+install, double-click `np4m.cmd` in that folder to launch it; your
+browser opens automatically at `http://127.0.0.1:5000/`.
+
+> Looking for overrides (custom port, bind address, BYO certificate,
+> etc.)? See the full [Install](#install) section below.
+
+---
+
 ## Features
 
 ### Pick a target platform
