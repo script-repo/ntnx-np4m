@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import time
 import urllib.parse
@@ -40,6 +41,7 @@ from flask import (
     Flask,
     Response,
     jsonify,
+    make_response,
     render_template,
     request,
     stream_with_context,
@@ -48,7 +50,7 @@ from flask import (
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 __version__ = "0.2.0"
-BUILD = 6   # bump on every commit
+BUILD = 7   # bump on every commit
 
 app = Flask(__name__)
 
@@ -217,12 +219,99 @@ def _format_api_error(payload: Any) -> str:
 
 @app.get("/")
 def index():
-    return render_template("index.html", version=__version__, build=BUILD)
+    # Disable browser caching so newly-deployed builds (which inline all
+    # JS/CSS in the template) replace the old page on the very next request.
+    resp = make_response(
+        render_template("index.html", version=__version__, build=BUILD)
+    )
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
+    return resp
 
 
 @app.get("/api/version")
 def api_version():
     return jsonify(version=__version__, build=BUILD)
+
+
+# How long to remember the last successful upstream check so we don't hammer
+# GitHub on every page load. The UI polls /api/check-update on load and at
+# most once every few minutes after that.
+_UPDATE_CHECK_CACHE: dict[str, Any] = {"at": 0.0, "result": None}
+_UPDATE_CHECK_TTL = 300  # 5 minutes
+_UPSTREAM_APP_PY_URL = (
+    "https://raw.githubusercontent.com/script-repo/ntnx-np4m/main/app.py"
+)
+_UPSTREAM_RELEASES_URL = "https://github.com/script-repo/ntnx-np4m"
+
+
+def _parse_remote_build(text: str) -> int | None:
+    """Pull BUILD = <int> out of a raw app.py source dump."""
+    if not text:
+        return None
+    m = re.search(r"^\s*BUILD\s*=\s*(\d+)\b", text, flags=re.MULTILINE)
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except ValueError:
+        return None
+
+
+@app.get("/api/check-update")
+def api_check_update():
+    """Compare local BUILD to upstream main BUILD and report.
+
+    Cached server-side for 5 minutes so the page-load polling doesn't hit
+    GitHub every refresh. Pass ?force=1 to bypass the cache.
+    """
+    force = request.args.get("force", "").lower() in {"1", "true", "yes"}
+    now = time.time()
+    if (
+        not force
+        and _UPDATE_CHECK_CACHE["result"] is not None
+        and now - _UPDATE_CHECK_CACHE["at"] < _UPDATE_CHECK_TTL
+    ):
+        return jsonify(_UPDATE_CHECK_CACHE["result"])
+
+    try:
+        r = requests.get(_UPSTREAM_APP_PY_URL, timeout=8)
+    except requests.RequestException as exc:
+        return (
+            jsonify(
+                local=BUILD,
+                remote=None,
+                update_available=False,
+                error=f"upstream fetch failed: {exc}",
+                repo_url=_UPSTREAM_RELEASES_URL,
+            ),
+            200,
+        )
+    if r.status_code >= 400:
+        return (
+            jsonify(
+                local=BUILD,
+                remote=None,
+                update_available=False,
+                error=f"upstream HTTP {r.status_code}",
+                repo_url=_UPSTREAM_RELEASES_URL,
+            ),
+            200,
+        )
+    remote_build = _parse_remote_build(r.text)
+    result = {
+        "local": BUILD,
+        "remote": remote_build,
+        "update_available": (
+            remote_build is not None and remote_build > BUILD
+        ),
+        "repo_url": _UPSTREAM_RELEASES_URL,
+        "checked_at": int(now),
+    }
+    _UPDATE_CHECK_CACHE["at"] = now
+    _UPDATE_CHECK_CACHE["result"] = result
+    return jsonify(result)
 
 
 def _auth_from_body(body: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
@@ -958,7 +1047,7 @@ def _try_import_pyvmomi():
 
 @app.post("/api/source/vcenter/connect")
 def api_source_vcenter_connect():
-    SmartConnect, Disconnect, vim, imp_err = _try_import_pyvmomi()
+    _, _, _, imp_err = _try_import_pyvmomi()
     if imp_err is not None:
         return (
             jsonify(
@@ -982,28 +1071,44 @@ def api_source_vcenter_connect():
         port = int(port)
     except (TypeError, ValueError):
         return jsonify(error="port must be an integer"), 400
-    import ssl as _ssl
 
-    ctx = _ssl.create_default_context()
-    if ignore_ssl:
-        ctx.check_hostname = False
-        ctx.verify_mode = _ssl.CERT_NONE
+    # We reuse the same SmartConnect for the inventory walk so the user
+    # gets the connect + the listing in a single round-trip. This kills
+    # the "click 'Connect & list' twice" symptom: two back-to-back
+    # SmartConnects against a busy vCenter sometimes drop the second one,
+    # leaving the UI on a stale empty table.
+    tmp_sess = {
+        "host": host, "port": port,
+        "username": username, "password": password,
+        "ignore_ssl": ignore_ssl,
+    }
     try:
-        si = SmartConnect(
-            host=host, port=port, user=username, pwd=password, sslContext=ctx,
-            connectionPoolTimeout=15,
-        )
+        _, Disconnect, vim, si = _source_vcenter_smartconnect(tmp_sess)
     except Exception as exc:
         msg = str(exc)
         lower = msg.lower()
         if "incorrect user name or password" in lower or "cannot complete login" in lower:
             return jsonify(error="invalid vCenter credentials"), 401
         return jsonify(error=f"vCenter connect failed: {msg}"), 502
+
     about = None
+    rows: list[dict[str, Any]] = []
+    walk_error: str | None = None
     try:
-        about = si.content.about
-    except Exception:
-        pass
+        try:
+            about = si.content.about
+        except Exception:
+            pass
+        try:
+            rows = _walk_source_vcenter_inventory(vim, si)
+        except Exception as exc:
+            walk_error = f"vCenter inventory failed: {exc}"
+    finally:
+        try:
+            Disconnect(si)
+        except Exception:
+            pass
+
     token = secrets.token_urlsafe(24)
     SOURCE_SESSIONS[token] = {
         "kind": "vcenter",
@@ -1014,23 +1119,23 @@ def api_source_vcenter_connect():
         "ignore_ssl": ignore_ssl,
         "created_at": time.time(),
     }
-    try:
-        Disconnect(si)
-    except Exception:
-        pass
-    return jsonify(
-        source_token=token,
-        kind="vcenter",
-        host=host,
-        port=port,
-        username=username,
-        about={
+    payload: dict[str, Any] = {
+        "source_token": token,
+        "kind": "vcenter",
+        "host": host,
+        "port": port,
+        "username": username,
+        "about": {
             "name": getattr(about, "name", None),
             "version": getattr(about, "version", None),
             "build": getattr(about, "build", None),
             "fullName": getattr(about, "fullName", None),
         },
-    )
+        "rows": rows,
+    }
+    if walk_error:
+        payload["inventory_error"] = walk_error
+    return jsonify(payload)
 
 
 def _vcenter_decode_vlan(vim, dvpg_default_config) -> tuple[int | None, str]:
@@ -1104,151 +1209,169 @@ def _vcenter_collect_objects(content, vim, vimType):
             pass
 
 
-@app.post("/api/source/vcenter/inventory")
-def api_source_vcenter_inventory():
+def _walk_source_vcenter_inventory(vim, si) -> list[dict[str, Any]]:
+    """Inventory walk shared by /connect and /inventory; expects a live SI."""
+    content = si.content
+    rows: list[dict[str, Any]] = []
+
+    dvss = _vcenter_collect_objects(content, vim, vim.DistributedVirtualSwitch)
+    for dvs in dvss:
+        switch_name = getattr(dvs, "name", None)
+        try:
+            pgs = list(dvs.portgroup or [])
+        except Exception:
+            pgs = []
+        for pg in pgs:
+            try:
+                if getattr(pg.config, "uplink", False):
+                    continue
+            except Exception:
+                pass
+            pg_name = getattr(pg, "name", None) or getattr(pg.config, "name", None)
+            vlan_id, vlan_kind = _vcenter_decode_vlan(
+                vim, pg.config.defaultPortConfig
+            )
+            teaming = _vcenter_decode_teaming(
+                vim, pg.config.defaultPortConfig
+            )
+            rows.append(
+                {
+                    "kind": "portgroup",
+                    "extId": getattr(pg, "key", None),
+                    "name": pg_name,
+                    "vlan": vlan_id,
+                    "vlanKind": vlan_kind,
+                    "subnetType": "VLAN" if vlan_kind == "single" else None,
+                    "managed": False,
+                    "ipPrefix": None,
+                    "gateway": None,
+                    "clusterExtId": None,
+                    "clusterName": None,
+                    "switchExtId": getattr(dvs, "uuid", None),
+                    "switchName": switch_name,
+                    "switchKind": "DVS",
+                    **teaming,
+                }
+            )
+
+    hosts = _vcenter_collect_objects(content, vim, vim.HostSystem)
+    seen_std_pg = set()
+    for host in hosts:
+        try:
+            ns = host.config.network
+        except Exception:
+            continue
+        for pg in getattr(ns, "portgroup", []) or []:
+            spec = getattr(pg, "spec", None)
+            if not spec:
+                continue
+            key = (getattr(spec, "name", None), getattr(spec, "vswitchName", None))
+            if key in seen_std_pg:
+                continue
+            seen_std_pg.add(key)
+            vlan_id_raw = getattr(spec, "vlanId", 0) or 0
+            if vlan_id_raw == 4095:
+                vlan_id, vlan_kind = None, "trunk"
+            elif vlan_id_raw == 0:
+                vlan_id, vlan_kind = None, "none"
+            else:
+                vlan_id, vlan_kind = vlan_id_raw, "single"
+            teaming_policy = None
+            active_uplinks: list[str] = []
+            standby_uplinks: list[str] = []
+            failback = None
+            try:
+                nic_pol = pg.computedPolicy.nicTeaming
+                teaming_policy = getattr(nic_pol.policy, "value", None)
+                failback = getattr(nic_pol, "rollingOrder", None)
+                if failback is not None:
+                    failback = not failback
+                no = nic_pol.nicOrder
+                if no:
+                    active_uplinks = list(getattr(no, "activeNic", []) or [])
+                    standby_uplinks = list(getattr(no, "standbyNic", []) or [])
+            except Exception:
+                pass
+            rows.append(
+                {
+                    "kind": "portgroup",
+                    "extId": f"std:{getattr(spec, 'vswitchName', '')}:{getattr(spec, 'name', '')}",
+                    "name": getattr(spec, "name", None),
+                    "vlan": vlan_id,
+                    "vlanKind": vlan_kind,
+                    "subnetType": "VLAN" if vlan_kind == "single" else None,
+                    "managed": False,
+                    "ipPrefix": None,
+                    "gateway": None,
+                    "clusterExtId": None,
+                    "clusterName": None,
+                    "switchExtId": None,
+                    "switchName": getattr(spec, "vswitchName", None),
+                    "switchKind": "vSwitch",
+                    "activeUplinks": active_uplinks,
+                    "standbyUplinks": standby_uplinks,
+                    "teamingPolicy": teaming_policy,
+                    "failback": failback,
+                }
+            )
+
+    rows.sort(
+        key=lambda x: (
+            (x.get("switchName") or "").lower(),
+            (x.get("name") or "").lower(),
+        )
+    )
+    return rows
+
+
+def _source_vcenter_smartconnect(sess: dict[str, Any]):
+    """Open a fresh SI against a source vCenter session, with one retry.
+
+    Used by both /api/source/vcenter/connect (to verify creds + walk
+    inventory in one round trip) and /api/source/vcenter/inventory (the
+    explicit refresh path). Same retry semantics as the target helper.
+    """
     SmartConnect, Disconnect, vim, imp_err = _try_import_pyvmomi()
     if imp_err is not None:
-        return (
-            jsonify(
-                error="pyvmomi is not installed",
-                detail=str(imp_err),
-            ),
-            503,
-        )
-    body = request.get_json(force=True, silent=True) or {}
-    sess = _get_source_session(body.get("source_token"))
-    if not sess or sess.get("kind") != "vcenter":
-        return jsonify(error="not connected to a source vCenter"), 401
+        raise RuntimeError(f"pyvmomi is not installed: {imp_err}")
     import ssl as _ssl
 
     ctx = _ssl.create_default_context()
     if sess.get("ignore_ssl", True):
         ctx.check_hostname = False
         ctx.verify_mode = _ssl.CERT_NONE
+    last_exc: Exception | None = None
+    for attempt in range(2):
+        try:
+            si = SmartConnect(
+                host=sess["host"], port=sess["port"], user=sess["username"],
+                pwd=sess["password"], sslContext=ctx,
+                connectionPoolTimeout=15,
+            )
+            return SmartConnect, Disconnect, vim, si
+        except Exception as exc:
+            last_exc = exc
+            if attempt == 0:
+                time.sleep(0.75)
+            continue
+    raise last_exc if last_exc else RuntimeError("vCenter connect failed")
+
+
+@app.post("/api/source/vcenter/inventory")
+def api_source_vcenter_inventory():
+    body = request.get_json(force=True, silent=True) or {}
+    sess = _get_source_session(body.get("source_token"))
+    if not sess or sess.get("kind") != "vcenter":
+        return jsonify(error="not connected to a source vCenter"), 401
     try:
-        si = SmartConnect(
-            host=sess["host"], port=sess["port"], user=sess["username"],
-            pwd=sess["password"], sslContext=ctx, connectionPoolTimeout=15,
-        )
+        _, Disconnect, vim, si = _source_vcenter_smartconnect(sess)
+    except RuntimeError as exc:
+        return jsonify(error=str(exc)), 503
     except Exception as exc:
         return jsonify(error=f"vCenter reconnect failed: {exc}"), 502
     try:
-        content = si.content
-
-        rows: list[dict[str, Any]] = []
-
-        dvss = _vcenter_collect_objects(content, vim, vim.DistributedVirtualSwitch)
-        for dvs in dvss:
-            switch_name = getattr(dvs, "name", None)
-            try:
-                pgs = list(dvs.portgroup or [])
-            except Exception:
-                pgs = []
-            for pg in pgs:
-                try:
-                    if getattr(pg.config, "uplink", False):
-                        continue
-                except Exception:
-                    pass
-                pg_name = getattr(pg, "name", None) or getattr(pg.config, "name", None)
-                vlan_id, vlan_kind = _vcenter_decode_vlan(
-                    vim, pg.config.defaultPortConfig
-                )
-                teaming = _vcenter_decode_teaming(
-                    vim, pg.config.defaultPortConfig
-                )
-                rows.append(
-                    {
-                        "kind": "portgroup",
-                        "extId": getattr(pg, "key", None),
-                        "name": pg_name,
-                        "vlan": vlan_id,
-                        "vlanKind": vlan_kind,
-                        "subnetType": "VLAN" if vlan_kind == "single" else None,
-                        "managed": False,
-                        "ipPrefix": None,
-                        "gateway": None,
-                        "clusterExtId": None,
-                        "clusterName": None,
-                        "switchExtId": getattr(dvs, "uuid", None),
-                        "switchName": switch_name,
-                        "switchKind": "DVS",
-                        **teaming,
-                    }
-                )
-
-        hosts = _vcenter_collect_objects(content, vim, vim.HostSystem)
-        seen_std_pg = set()
-        for host in hosts:
-            try:
-                ns = host.config.network
-            except Exception:
-                continue
-            for pg in getattr(ns, "portgroup", []) or []:
-                spec = getattr(pg, "spec", None)
-                if not spec:
-                    continue
-                key = (getattr(spec, "name", None), getattr(spec, "vswitchName", None))
-                if key in seen_std_pg:
-                    continue
-                seen_std_pg.add(key)
-                vlan_id_raw = getattr(spec, "vlanId", 0) or 0
-                if vlan_id_raw == 4095:
-                    vlan_id, vlan_kind = None, "trunk"
-                elif vlan_id_raw == 0:
-                    vlan_id, vlan_kind = None, "none"
-                else:
-                    vlan_id, vlan_kind = vlan_id_raw, "single"
-                teaming_policy = None
-                active_uplinks: list[str] = []
-                standby_uplinks: list[str] = []
-                failback = None
-                try:
-                    nic_pol = pg.computedPolicy.nicTeaming
-                    teaming_policy = getattr(nic_pol.policy, "value", None)
-                    failback = getattr(nic_pol, "rollingOrder", None)
-                    if failback is not None:
-                        failback = not failback
-                    no = nic_pol.nicOrder
-                    if no:
-                        active_uplinks = list(getattr(no, "activeNic", []) or [])
-                        standby_uplinks = list(getattr(no, "standbyNic", []) or [])
-                except Exception:
-                    pass
-                rows.append(
-                    {
-                        "kind": "portgroup",
-                        "extId": f"std:{getattr(spec, 'vswitchName', '')}:{getattr(spec, 'name', '')}",
-                        "name": getattr(spec, "name", None),
-                        "vlan": vlan_id,
-                        "vlanKind": vlan_kind,
-                        "subnetType": "VLAN" if vlan_kind == "single" else None,
-                        "managed": False,
-                        "ipPrefix": None,
-                        "gateway": None,
-                        "clusterExtId": None,
-                        "clusterName": None,
-                        "switchExtId": None,
-                        "switchName": getattr(spec, "vswitchName", None),
-                        "switchKind": "vSwitch",
-                        "activeUplinks": active_uplinks,
-                        "standbyUplinks": standby_uplinks,
-                        "teamingPolicy": teaming_policy,
-                        "failback": failback,
-                    }
-                )
-
-        rows.sort(
-            key=lambda x: (
-                (x.get("switchName") or "").lower(),
-                (x.get("name") or "").lower(),
-            )
-        )
-        return jsonify(
-            kind="vcenter",
-            host=sess["host"],
-            rows=rows,
-        )
+        rows = _walk_source_vcenter_inventory(vim, si)
+        return jsonify(kind="vcenter", host=sess["host"], rows=rows)
     except Exception as exc:
         return jsonify(error=f"vCenter inventory failed: {exc}"), 502
     finally:
@@ -1271,6 +1394,11 @@ def _target_vcenter_connect_si(sess: dict[str, Any]):
 
     Mirrors the pattern used by api_source_vcenter_inventory: we do not hold
     long-lived vCenter sessions in process memory, only the credentials.
+
+    Retries once on transient errors. vCenter occasionally drops the next
+    SmartConnect after a fresh Disconnect (especially under quick succession,
+    e.g. when the UI toggles VDS<->VSS), so a single back-off retry covers
+    that without holding long-lived sessions in process memory.
     """
     SmartConnect, Disconnect, vim, imp_err = _try_import_pyvmomi()
     if imp_err is not None:
@@ -1281,11 +1409,21 @@ def _target_vcenter_connect_si(sess: dict[str, Any]):
     if sess.get("ignore_ssl", True):
         ctx.check_hostname = False
         ctx.verify_mode = _ssl.CERT_NONE
-    si = SmartConnect(
-        host=sess["host"], port=sess["port"], user=sess["username"],
-        pwd=sess["password"], sslContext=ctx, connectionPoolTimeout=15,
-    )
-    return SmartConnect, Disconnect, vim, si
+    last_exc: Exception | None = None
+    for attempt in range(2):
+        try:
+            si = SmartConnect(
+                host=sess["host"], port=sess["port"], user=sess["username"],
+                pwd=sess["password"], sslContext=ctx,
+                connectionPoolTimeout=15,
+            )
+            return SmartConnect, Disconnect, vim, si
+        except Exception as exc:
+            last_exc = exc
+            if attempt == 0:
+                time.sleep(0.75)
+            continue
+    raise last_exc if last_exc else RuntimeError("vCenter connect failed")
 
 
 @app.post("/api/target/vcenter/connect")
