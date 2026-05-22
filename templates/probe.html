@@ -161,6 +161,7 @@
     </div>
     <div style="display:flex; gap:8px; align-items:center;">
       <span class="pill"><span class="dot"></span><span>Mode: PROBE</span></span>
+      <button class="secondary" id="btn-self-update" title="git pull + pip install + restart this probe agent.">Update + restart</button>
       <button class="secondary" id="btn-to-master">Switch to master</button>
     </div>
   </header>
@@ -243,6 +244,7 @@
 
   <script>
     const $ = (id) => document.getElementById(id);
+    const LS_TOKEN_KEY = "np4m-probe-session-token";
     const state = {
       authRequired: null,    // null = unknown, true/false from health
       sessionToken: "",      // captured by user paste OR last rotate
@@ -285,7 +287,59 @@
       state.sessionToken = (t || "").trim();
       const sti = $("session-token");
       if (opts && opts.fill) sti.value = state.sessionToken;
+      // Persist per-browser so a page refresh doesn't lock us out of
+      // our own probe (the agent has no UI to recover from that).
+      try {
+        if (state.sessionToken) localStorage.setItem(LS_TOKEN_KEY, state.sessionToken);
+        else localStorage.removeItem(LS_TOKEN_KEY);
+      } catch (_) {}
       updateAuthGates();
+    }
+
+    async function runSelfUpdate() {
+      if (!confirm("Pull the latest NP4M code on this probe, install deps, and restart the agent? The /probe/* endpoints will be unavailable for ~5s while it bounces.")) return;
+      const btn = $("btn-self-update");
+      btn.disabled = true;
+      $("logpane").innerHTML = "";
+      try {
+        const r = await fetch("/api/self-update", { method: "POST" });
+        if (!r.ok) {
+          const txt = await r.text();
+          alert("Self-update rejected: HTTP " + r.status + " " + txt.slice(0, 200));
+          return;
+        }
+        const reader = r.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = "";
+        const pane = $("logpane");
+        const append = (level, msg) => {
+          const line = document.createElement("div");
+          line.className = "logline " + (level || "info");
+          line.textContent = msg;
+          pane.appendChild(line);
+          pane.scrollTop = pane.scrollHeight;
+        };
+        while (true) {
+          const ck = await reader.read();
+          if (ck.done) break;
+          buf += decoder.decode(ck.value, { stream: true });
+          let idx;
+          while ((idx = buf.indexOf("\n")) >= 0) {
+            const line = buf.slice(0, idx); buf = buf.slice(idx + 1);
+            if (!line.trim()) continue;
+            try {
+              const evt = JSON.parse(line);
+              append(evt.level, evt.msg || "");
+            } catch (_) {}
+          }
+        }
+        // Give the agent ~5s to respawn before reloading.
+        setTimeout(() => window.location.reload(), 5000);
+      } catch (e) {
+        alert("Self-update failed: " + e.message);
+      } finally {
+        btn.disabled = false;
+      }
     }
 
     async function rotateToken() {
@@ -468,9 +522,17 @@
       $("btn-refresh-logs").addEventListener("click", loadLogs);
       $("btn-to-master").addEventListener("click", switchToMaster);
 
+      $("btn-self-update").addEventListener("click", runSelfUpdate);
       $("btn-cfg-save").addEventListener("click", saveConfig);
       $("btn-cfg-refresh").addEventListener("click", loadConfig);
       $("btn-token-rotate").addEventListener("click", rotateToken);
+
+      // Restore a previously-pasted token for this browser so a refresh
+      // doesn't lock the operator out of their own probe.
+      try {
+        const saved = localStorage.getItem(LS_TOKEN_KEY) || "";
+        if (saved) setSessionToken(saved, { fill: true });
+      } catch (_) {}
       $("btn-token-copy").addEventListener("click", async () => {
         const v = $("token-reveal-value").textContent || "";
         try {

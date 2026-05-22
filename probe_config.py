@@ -18,11 +18,18 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import sys
 import threading
 from typing import Any
 
 CONFIG_PATH_ENV = "NP4M_PROBE_CONFIG"
-DEFAULT_PATH = pathlib.Path.home() / ".np4m-probe.json"
+# Co-locate the persistence file with the agent's own source tree
+# instead of using ``~`` so that sudo/systemd HOME translation can't
+# silently redirect writes to an unintended directory (or a directory
+# the agent doesn't have permission to create). The repo dir is always
+# writable by whatever user the agent is running as, since it owns the
+# .venv there.
+DEFAULT_PATH = pathlib.Path(__file__).resolve().parent / ".np4m-probe.json"
 
 TOKEN_ENV = "NP4M_PROBE_TOKEN"
 MGMT_IFACE_ENV = "NP4M_MGMT_IFACE"
@@ -65,8 +72,16 @@ def _save_unlocked() -> None:
             os.chmod(p, 0o600)
         except Exception:
             pass
-    except Exception:
-        pass
+    except Exception as exc:
+        # Earlier builds swallowed this silently, which made
+        # token-rotate / iface-save look like they worked when in fact
+        # nothing was persisted. Surface it loudly to stderr so it
+        # shows up in the systemd / nohup log on the probe.
+        print(
+            f"np4m probe_config: failed to persist {p!s}: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def _get(key: str, env_fallback: str | None = None) -> str | None:
