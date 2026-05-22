@@ -363,6 +363,46 @@ def _pc_list_vm_nics(
     return out
 
 
+def _pc_get_nic(
+    session: requests.Session,
+    base_url: str,
+    vm_ext_id: str,
+    nic_ext_id: str,
+) -> tuple[dict[str, Any], str | None]:
+    """Fetch a single NIC body. Returns (nic_object, etag).
+
+    The PC v4 envelope is ``{"data": {...nic object...}}`` on success;
+    some older builds return the object at the top level, so we
+    tolerate both."""
+    r = session.get(
+        f"{base_url}/api/vmm/v4.0/ahv/config/vms/{vm_ext_id}/nics/{nic_ext_id}",
+        timeout=20,
+    )
+    if r.status_code >= 400:
+        raise RuntimeError(
+            f"GET nic {nic_ext_id} on vm {vm_ext_id} failed "
+            f"HTTP {r.status_code}: {r.text[:200]}"
+        )
+    try:
+        envelope = r.json() or {}
+    except ValueError:
+        envelope = {}
+    data = envelope.get("data") if isinstance(envelope.get("data"), dict) else envelope
+    if not isinstance(data, dict):
+        raise RuntimeError(
+            f"GET nic {nic_ext_id} returned unexpected body shape"
+        )
+    etag = r.headers.get("ETag") or r.headers.get("Etag")
+    return data, etag
+
+
+# Fields that PC v4 echoes back on a NIC GET but rejects (or silently
+# ignores) in a PUT body. Strip them before sending the mutation.
+_NIC_READONLY_FIELDS: frozenset[str] = frozenset({
+    "links", "tenantId",
+})
+
+
 def _pc_swap_nic_subnet(
     session: requests.Session,
     base_url: str,
@@ -370,17 +410,26 @@ def _pc_swap_nic_subnet(
     nic_ext_id: str,
     subnet_ext_id: str,
 ) -> dict[str, Any]:
-    """PUT the NIC with a new subnetReference. Returns the task body once
-    it reaches a terminal state. Raises RuntimeError on non-success."""
-    _vm, etag = _pc_get_vm(session, base_url, vm_ext_id)
+    """Re-point an existing NIC at a new subnet.
+
+    PC v4 treats PUT /vms/{vmExtId}/nics/{nicExtId} as a full-object
+    replacement, so we have to round-trip the *complete* NIC body (incl.
+    MAC, vlanMode, trunk list, IP config) and only mutate the subnet
+    reference. Anything else gets reset to defaults server-side — most
+    visibly, the MAC becomes EMPTY and the task fails with "VM NIC MAC
+    address: EMPTY".
+    """
+    nic, etag = _pc_get_nic(session, base_url, vm_ext_id, nic_ext_id)
+    body: dict[str, Any] = {
+        k: v for k, v in nic.items() if k not in _NIC_READONLY_FIELDS
+    }
+    network_info = dict(body.get("networkInfo") or {})
+    network_info["subnet"] = {"extId": subnet_ext_id}
+    body["networkInfo"] = network_info
+
     headers: dict[str, str] = {"NTNX-Request-Id": str(uuid.uuid4())}
     if etag:
         headers["If-Match"] = etag
-    body = {
-        "networkInfo": {
-            "subnet": {"extId": subnet_ext_id},
-        },
-    }
     r = session.put(
         f"{base_url}/api/vmm/v4.0/ahv/config/vms/{vm_ext_id}/nics/{nic_ext_id}",
         json=body,
