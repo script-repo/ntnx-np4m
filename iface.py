@@ -97,8 +97,28 @@ def list_interfaces() -> list[dict[str, Any]]:
     return out
 
 
+_PRIVILEGED_BINARIES = {"nmcli", "ip"}
+
+
+def _needs_sudo(cmd: list[str]) -> bool:
+    """nmcli + ip both need CAP_NET_ADMIN (and, for nmcli, talking to NM
+    over the system D-Bus). When the probe runs under the systemd
+    np4m.service as the unprivileged ``np4m`` user we transparently
+    prefix those commands with ``sudo -n`` so the same code path also
+    works for the legacy ``sudo nohup python app.py`` deploy that runs
+    everything as root. The ``-n`` flag means sudo fails fast (instead
+    of prompting) if /etc/sudoers.d/np4m-network is missing."""
+    if not cmd:
+        return False
+    if os.geteuid() == 0:
+        return False
+    return os.path.basename(cmd[0]) in _PRIVILEGED_BINARIES
+
+
 def _run(cmd: list[str], *, timeout: int = 10) -> tuple[int, str]:
     """Run a subprocess, return (rc, combined_output). Never raises."""
+    if _needs_sudo(cmd):
+        cmd = ["sudo", "-n", *cmd]
     try:
         p = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout,
