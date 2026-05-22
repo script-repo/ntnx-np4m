@@ -1162,9 +1162,11 @@ storage_test,200,10.0.200.50,24,10.0.200.1,8.8.8.8"></textarea>
           ? "via API key" : `as ${(res.auth && res.auth.username) || "?"}`;
         setStatus("connect-status", "ok", `Connected to ${res.host}`);
         addLog("ok", `Connected to ${res.host} ${who}.`);
+        if (typeof updateProbeFetchNicsEnabled === "function") updateProbeFetchNicsEnabled();
         await loadClusters();
       } catch (e) {
         state.token = null;
+        if (typeof updateProbeFetchNicsEnabled === "function") updateProbeFetchNicsEnabled();
         setStatus("connect-status", "err", "Connect failed");
         addLog("error", `Connect failed: ${e.message}`);
       } finally {
@@ -2448,7 +2450,7 @@ storage_test,200,10.0.200.50,24,10.0.200.1,8.8.8.8"></textarea>
       nicSel.innerHTML = '<option value="">-- fetch NICs to populate --</option>';
       nicSel.disabled = true;
       $("btn-probe-save-nic").disabled = true;
-      $("btn-probe-fetch-nics").disabled = !(p && p.probe_vm_uuid && state.token);
+      updateProbeFetchNicsEnabled();
       // Reflect the radio selection in the table.
       document.querySelectorAll("#probe-tbody tr").forEach((tr) => {
         if (tr.dataset.probeId === probeId) tr.classList.add("selected");
@@ -2486,6 +2488,17 @@ storage_test,200,10.0.200.50,24,10.0.200.1,8.8.8.8"></textarea>
       } finally {
         $("btn-probe-register").disabled = false;
       }
+    }
+
+    function updateProbeFetchNicsEnabled() {
+      const uuid = ($("probe-vm-uuid").value || "").trim();
+      const hasToken = !!state.token;
+      const btn = $("btn-probe-fetch-nics");
+      if (!btn) return;
+      btn.disabled = !(uuid && hasToken);
+      btn.title = !hasToken
+        ? "Connect to a target Prism Central first (step 1)"
+        : (!uuid ? "Enter a probe VM UUID" : "");
     }
 
     async function fetchProbeNics() {
@@ -2821,6 +2834,8 @@ storage_test,200,10.0.200.50,24,10.0.200.1,8.8.8.8"></textarea>
       $("btn-probe-save-nic").addEventListener("click", saveProbeNicSelection);
       $("btn-probe-run").addEventListener("click", runProbeTests);
       $("probe-networks-input").addEventListener("input", parseProbeNetworks);
+      $("probe-vm-uuid").addEventListener("input", updateProbeFetchNicsEnabled);
+      updateProbeFetchNicsEnabled();
       $("cluster-select").addEventListener("change", updateRunProbesButton);
       parseProbeNetworks();
       loadProbes();
