@@ -120,6 +120,10 @@
     }
     .update-btn[data-state="error"] .dot { background: #ef4444; }
 
+    /* Mode status pill is purely informational. The "Switch to ..."
+       button next to it is what flips the mode (mirrors probe.html so
+       both pages have the same [Update] [Mode status] [Switch to ...]
+       header layout). */
     .mode-pill {
       display: inline-flex;
       align-items: center;
@@ -133,8 +137,7 @@
       font-size: 12px;
       font-weight: 600;
       letter-spacing: 0.2px;
-      cursor: pointer;
-      transition: background 0.15s, color 0.15s, border-color 0.15s;
+      user-select: none;
     }
     .mode-pill .dot {
       width: 8px; height: 8px; border-radius: 50%;
@@ -148,8 +151,7 @@
       background: #4a2e0f; color: #fde68a; border-color: #d97706;
     }
     .mode-pill[data-mode="probe"] .dot { background: #d97706; }
-    .mode-pill:hover { filter: brightness(1.1); }
-    .mode-pill:disabled { cursor: progress; opacity: 0.7; }
+    .header-actions button.secondary { padding: 6px 12px; }
 
     .probe-table {
       width: 100%;
@@ -598,14 +600,18 @@
       <div class="sub">Bulk-create networks on Nutanix AHV or VMware vSphere &mdash; with optional import from another Prism Central, VMware vCenter, or standalone ESXi host</div>
     </div>
     <div class="header-actions">
-      <button id="mode-pill" type="button" class="mode-pill" data-mode="master" title="Click to switch to probe mode.">
-        <span class="dot"></span>
-        <span class="label">Mode: MASTER</span>
-      </button>
       <a id="update-btn" class="update-btn" data-state="loading" title="Checking for updates...">
         <span class="dot"></span>
         <span class="label">Checking...</span>
       </a>
+      <span id="mode-pill" class="mode-pill" data-mode="master" title="This node is running as the master.">
+        <span class="dot"></span>
+        <span class="label">Mode: MASTER</span>
+      </span>
+      <button id="btn-to-probe" type="button" class="secondary"
+              title="Flip this node into probe mode (the probe page will replace this UI on reload).">
+        Switch to probe
+      </button>
     </div>
   </header>
 
@@ -1096,15 +1102,31 @@ network_VLAN_1003 1003"></textarea>
       </div>
 
       <div class="row" style="margin-top:14px;">
-        <div class="field" style="flex: 2 1 320px;">
+        <div class="field" style="flex: 2 1 280px;">
           <label for="probe-vm-uuid">Probe VM UUID (on the target cluster)</label>
-          <input type="text" id="probe-vm-uuid" placeholder="vmExtId from Prism" autocomplete="off" />
+          <input type="text" id="probe-vm-uuid" placeholder="vmExtId from Prism, or pick from PC ->" autocomplete="off" />
         </div>
+        <div class="field" style="flex: 0 0 auto;">
+          <label>&nbsp;</label>
+          <button class="secondary" id="btn-probe-vm-load" disabled
+                  title="Connect to a target PC + pick a cluster first. Lists VMs on that cluster so you can pick the probe VM by name.">
+            Load VMs from PC
+          </button>
+        </div>
+        <div class="field" style="flex: 2 1 240px;">
+          <label for="probe-vm-select">Pick probe VM</label>
+          <select id="probe-vm-select" disabled>
+            <option value="">-- load VMs first --</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:8px;">
         <div class="field" style="flex: 0 0 auto;">
           <label>&nbsp;</label>
           <button class="secondary" id="btn-probe-fetch-nics" disabled>Fetch probe NICs</button>
         </div>
-        <div class="field" style="flex: 1 1 240px;">
+        <div class="field" style="flex: 2 1 240px;">
           <label for="probe-nic-select">Test vNIC</label>
           <select id="probe-nic-select" disabled>
             <option value="">-- fetch NICs first --</option>
@@ -1138,6 +1160,16 @@ network_VLAN_1003 1003"></textarea>
         </div>
         <div class="field" style="flex: 0 0 auto;">
           <label>&nbsp;</label>
+          <button class="secondary" id="btn-probe-add-selected" disabled
+                  title="Visible after Load subnets from cluster opens the picker below.">Add selected</button>
+        </div>
+        <div class="field" style="flex: 0 0 auto;">
+          <label>&nbsp;</label>
+          <button class="secondary" id="btn-probe-subnet-pick-close" disabled
+                  title="Visible after Load subnets from cluster opens the picker below.">Hide picker</button>
+        </div>
+        <div class="field" style="flex: 0 0 auto;">
+          <label>&nbsp;</label>
           <button class="secondary" id="btn-probe-add-blank-row">Add blank row</button>
         </div>
         <div class="field" style="flex: 0 0 auto;">
@@ -1149,6 +1181,11 @@ network_VLAN_1003 1003"></textarea>
           <button class="secondary" id="btn-probe-csv-import">Import CSV...</button>
           <input type="file" id="probe-csv-file" accept=".csv,text/csv" style="display:none;" />
         </div>
+        <div class="field" style="flex: 0 0 auto;">
+          <label>&nbsp;</label>
+          <button class="secondary" id="btn-probe-csv-export" disabled
+                  title="Save the current rows below to a CSV file (same column order as Import CSV).">Export CSV</button>
+        </div>
         <div class="field" style="flex: 1 1 auto;">
           <label>&nbsp;</label>
           <div class="summary-line" id="probe-rows-summary">0 rows, 0 ready to run.</div>
@@ -1156,7 +1193,7 @@ network_VLAN_1003 1003"></textarea>
       </div>
 
       <div class="source-table-wrap" id="probe-subnet-pick-wrap" style="display:none; margin-top:10px;">
-        <div class="hint" style="margin:0 0 6px;">Tick the subnets to add as test rows below, then press <strong>Add selected</strong>.</div>
+        <div class="hint" style="margin:0 0 6px;">Tick the subnets to add as test rows below, then press <strong>Add selected</strong> in the button row above.</div>
         <table class="vlan-pick-table">
           <thead>
             <tr>
@@ -1168,14 +1205,6 @@ network_VLAN_1003 1003"></textarea>
           </thead>
           <tbody id="probe-subnet-pick-tbody"></tbody>
         </table>
-        <div class="row" style="margin-top:8px;">
-          <div class="field" style="flex: 0 0 auto;">
-            <button class="secondary" id="btn-probe-add-selected">Add selected</button>
-          </div>
-          <div class="field" style="flex: 0 0 auto;">
-            <button class="secondary" id="btn-probe-subnet-pick-close">Hide picker</button>
-          </div>
-        </div>
       </div>
 
       <div class="source-table-wrap" id="probe-rows-wrap" style="margin-top:14px;">
@@ -1245,6 +1274,8 @@ network_VLAN_1003 1003"></textarea>
         <h2>Log</h2>
         <div class="log-head-actions">
           <span class="pill gray" id="log-count">0 lines</span>
+          <button class="secondary" id="btn-export-report" disabled
+                  title="Export the latest probe-test run as a CSV report (one row per VLAN, with subnet, NIC, IP/prefix/gateway, gateway ping pass/fail, external IP, external ping pass/fail).">Export report</button>
           <button class="secondary" id="btn-download-log" disabled title="Download log as a text file">Download</button>
         </div>
       </div>
@@ -1307,6 +1338,131 @@ network_VLAN_1003 1003"></textarea>
       $("log-pane").innerHTML = "";
       logBuffer.length = 0;
       refreshLogCount();
+    }
+
+    // Shared helpers for the two "export as CSV" buttons below the VLAN
+    // editor + the log card. RFC 4180-ish quoting: wrap every field, double
+    // any embedded quotes. Excel and Numbers both open the result cleanly.
+    function csvField(v) {
+      const s = (v == null) ? "" : String(v);
+      return '"' + s.replace(/"/g, '""') + '"';
+    }
+    function csvRow(cells) {
+      return cells.map(csvField).join(",");
+    }
+    function downloadBlob(filename, mime, text) {
+      const blob = new Blob([text], { type: mime + ";charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = filename;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+    function isoFileStamp() {
+      return new Date().toISOString().replace(/[:.]/g, "-").replace(/Z$/, "");
+    }
+
+    // Per-VLAN structured results captured from the NDJSON stream of the
+    // latest /api/probe-tests/run call, used by Export report. Reset on
+    // each run start so an old run's data can't leak into a new export.
+    const reportState = {
+      rows: [],
+      startedAt: null,
+      probeName: null,
+      probeHost: null,
+    };
+
+    function updateExportReportEnabled() {
+      const btn = $("btn-export-report");
+      if (!btn) return;
+      const n = reportState.rows.length;
+      btn.disabled = n === 0;
+      btn.title = n === 0
+        ? "Run a probe test first; the report covers the latest run."
+        : `Export the latest run (${n} VLAN row(s)) to CSV.`;
+    }
+
+    function exportRunReport() {
+      const rows = reportState.rows;
+      if (!rows.length) {
+        addLog("warn", "No probe-test results to export yet. Run probe tests first.");
+        return;
+      }
+      // Columns map 1:1 onto the user-requested fields:
+      //  1) subnet configured           -> "subnet"   (name [VLAN])
+      //  2) test NIC configured         -> "test_nic" (probe vNIC extId)
+      //  3) guest IP                    -> "test_ip"
+      //  4) prefix                      -> "prefix"
+      //  5) gateway IP                  -> "gateway_ip"
+      //  6) gateway ping pass/fail      -> "gateway_ping"
+      //  7) external IP                 -> "external_ip"
+      //  8) external ping pass/fail     -> "external_ping"
+      // Trailing columns (status/detail/subnet_ext_id/test_iface/run_ts)
+      // are non-required extras that make the CSV self-describing.
+      const header = csvRow([
+        "subnet", "test_nic", "test_ip", "prefix",
+        "gateway_ip", "gateway_ping",
+        "external_ip", "external_ping",
+        "status", "detail",
+        "subnet_ext_id", "test_iface", "run_iso",
+      ]);
+      const lines = [header];
+      rows.forEach((r) => {
+        const subnet = r.vlan == null
+          ? (r.subnet_name || "")
+          : `${r.subnet_name || ""} [VLAN ${r.vlan}]`;
+        const runIso = r.run_ts
+          ? new Date(r.run_ts * 1000).toISOString()
+          : "";
+        lines.push(csvRow([
+          subnet,
+          r.test_nic_ext_id || "",
+          r.guest_ip || "",
+          r.prefix == null ? "" : String(r.prefix),
+          r.gateway || "",
+          r.gateway_ping || "",
+          r.external_ip || "",
+          r.external_ping || "",
+          r.status || "",
+          r.detail || "",
+          r.subnet_ext_id || "",
+          r.test_iface || "",
+          runIso,
+        ]));
+      });
+      const meta = [
+        `# NP4M probe-test report`,
+        `# generated:  ${new Date().toISOString()}`,
+        `# probe:      ${reportState.probeName || "?"} (${reportState.probeHost || "?"})`,
+        `# run start:  ${reportState.startedAt ? reportState.startedAt.toISOString() : "?"}`,
+        `# rows:       ${rows.length}`,
+        ``,
+      ].join("\n");
+      downloadBlob(`np4m-probe-report-${isoFileStamp()}.csv`, "text/csv",
+                   meta + lines.join("\n") + "\n");
+      addLog("ok", `Exported probe-test report (${rows.length} VLAN row(s)) to CSV.`);
+    }
+
+    function exportProbeRowsCsv() {
+      const rows = (probeState && probeState.rows) ? probeState.rows : [];
+      if (!rows.length) {
+        addLog("warn", "No VLAN rows to export.");
+        return;
+      }
+      // Same column order Import CSV accepts, so a round-trip works.
+      const lines = [csvRow(["name", "vlan", "test_ip", "prefix", "gateway", "external_ip"])];
+      rows.forEach((r) => {
+        lines.push(csvRow([
+          r.name || "",
+          r.vlan == null ? "" : String(r.vlan),
+          r.test_ip || "",
+          r.prefix == null ? "" : String(r.prefix),
+          r.gateway || "",
+          r.external_ip || "",
+        ]));
+      });
+      downloadBlob(`np4m-vlans-${isoFileStamp()}.csv`, "text/csv", lines.join("\n") + "\n");
+      addLog("ok", `Exported ${rows.length} VLAN row(s) to CSV.`);
     }
 
     function downloadLog() {
@@ -2530,8 +2686,15 @@ network_VLAN_1003 1003"></textarea>
       pill.dataset.mode = modeName;
       if (label) label.textContent = "Mode: " + modeName.toUpperCase();
       pill.title = modeName === "master"
-        ? "Click to switch this node to probe mode."
-        : "Click to switch this node back to master mode.";
+        ? "This node is running as the master."
+        : "This node is running as a probe.";
+      const flipBtn = $("btn-to-probe");
+      if (flipBtn) {
+        flipBtn.textContent = modeName === "master" ? "Switch to probe" : "Switch to master";
+        flipBtn.title = modeName === "master"
+          ? "Flip this node into probe mode (the probe page will replace this UI on reload)."
+          : "Flip this node back into master mode.";
+      }
       // Probe-mode would render a different template; until the page is
       // reloaded, we just gray out master-only cards if the operator
       // somehow ends up in probe mode on this page (rare).
@@ -2546,22 +2709,22 @@ network_VLAN_1003 1003"></textarea>
 
     async function flipMode() {
       const pill = $("mode-pill");
+      const btn = $("btn-to-probe");
       if (!pill) return;
       const currentMode = pill.dataset.mode || "master";
       const next = currentMode === "master" ? "probe" : "master";
-      pill.disabled = true;
+      if (btn) btn.disabled = true;
       try {
         const j = await postJson("/api/mode", { mode: next });
         applyModeUi(j.mode || next);
         addLog("system", `Switched to ${(j.mode || next).toUpperCase()} mode. Reload for the role-specific page.`);
-        // Give the user a hint that the index page is the master view.
         if ((j.mode || next) === "probe") {
           setTimeout(() => window.location.reload(), 800);
         }
       } catch (e) {
         addLog("error", `Mode flip failed: ${e.message}`);
       } finally {
-        pill.disabled = false;
+        if (btn) btn.disabled = false;
       }
     }
 
@@ -2779,11 +2942,70 @@ network_VLAN_1003 1003"></textarea>
       const uuid = ($("probe-vm-uuid").value || "").trim();
       const hasToken = !!state.token;
       const btn = $("btn-probe-fetch-nics");
-      if (!btn) return;
-      btn.disabled = !(uuid && hasToken);
-      btn.title = !hasToken
-        ? "Connect to a target Prism Central first (step 1)"
-        : (!uuid ? "Enter a probe VM UUID" : "");
+      if (btn) {
+        btn.disabled = !(uuid && hasToken);
+        btn.title = !hasToken
+          ? "Connect to a target Prism Central first (step 1)"
+          : (!uuid ? "Enter a probe VM UUID (or load + pick one)" : "");
+      }
+      const loadBtn = $("btn-probe-vm-load");
+      if (loadBtn) {
+        loadBtn.disabled = !hasToken;
+        loadBtn.title = !hasToken
+          ? "Connect to a target Prism Central first (step 1)"
+          : "Lists VMs from PC; pick the probe VM by name instead of hunting its UUID.";
+      }
+    }
+
+    async function loadProbeVms() {
+      if (!state.token) {
+        addLog("error", "Connect to a target Prism Central first (Subnets tab, step 1).");
+        return;
+      }
+      const cluster = ($("cluster-select").value || "").trim();
+      // cluster_uuid is optional server-side, but on big PCs the list is
+      // unworkable without it; warn so the operator knows what they get.
+      const btn = $("btn-probe-vm-load");
+      const sel = $("probe-vm-select");
+      const prevLabel = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = "Loading...";
+      sel.disabled = true;
+      sel.innerHTML = '<option value="">-- loading from PC... --</option>';
+      try {
+        const res = await postJson("/api/probes/vm-list", {
+          target_token: state.token,
+          cluster_uuid: cluster || null,
+        });
+        const vms = res.vms || [];
+        sel.innerHTML = "";
+        if (vms.length === 0) {
+          sel.innerHTML = '<option value="">(no VMs returned)</option>';
+          addLog("warn", "PC returned 0 VMs. Wrong cluster?");
+          return;
+        }
+        const placeholder = document.createElement("option");
+        placeholder.value = "";
+        placeholder.textContent = cluster
+          ? `-- pick a VM (${vms.length} on this cluster) --`
+          : `-- pick a VM (${vms.length} total) --`;
+        sel.appendChild(placeholder);
+        vms.forEach((v) => {
+          const opt = document.createElement("option");
+          opt.value = v.extId || "";
+          const shortId = (v.extId || "").slice(0, 8);
+          opt.textContent = `${v.name || "(unnamed)"}   [${shortId}]`;
+          sel.appendChild(opt);
+        });
+        sel.disabled = false;
+        addLog("info", `Loaded ${vms.length} VM(s) from PC${cluster ? " (cluster-filtered)" : ""}.`);
+      } catch (e) {
+        sel.innerHTML = '<option value="">(load failed)</option>';
+        addLog("error", `Load VMs failed: ${e.message}`);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = prevLabel;
+      }
     }
 
     async function fetchProbeNics() {
@@ -2973,7 +3195,16 @@ network_VLAN_1003 1003"></textarea>
       if (ready > 0) setStatus("probe-vlans-status", "ok", `${ready} ready`);
       else if (total > 0) setStatus("probe-vlans-status", "err", `${total} incomplete`);
       else setStatus("probe-vlans-status", null, "No VLANs");
+      const exportBtn = $("btn-probe-csv-export");
+      if (exportBtn) exportBtn.disabled = total === 0;
       updateRunProbesButton();
+    }
+
+    function setSubnetPickerOpen(open) {
+      const wrap = $("probe-subnet-pick-wrap");
+      wrap.style.display = open ? "" : "none";
+      $("btn-probe-add-selected").disabled = !open;
+      $("btn-probe-subnet-pick-close").disabled = !open;
     }
 
     async function loadProbeSubnets() {
@@ -2994,7 +3225,7 @@ network_VLAN_1003 1003"></textarea>
         });
         probeState.pickerSubnets = (res.subnets || []).filter((s) => s.vlan != null);
         renderSubnetPicker();
-        $("probe-subnet-pick-wrap").style.display = "";
+        setSubnetPickerOpen(true);
         addLog("info", `Loaded ${probeState.pickerSubnets.length} subnet(s) from the cluster.`);
       } catch (e) {
         addLog("error", `Could not list cluster subnets: ${e.message}`);
@@ -3392,6 +3623,13 @@ network_VLAN_1003 1003"></textarea>
       setStatus("probe-run-status", "busy", "Running...");
       addLog("system",
         `Probe-test run: ${networks.length} VLAN(s) via probe '${probe.name}'.`);
+      // Reset the report buffer at the start of each run so Export
+      // report only ever produces rows from the latest run.
+      reportState.rows = [];
+      reportState.startedAt = new Date();
+      reportState.probeName = probe.name;
+      reportState.probeHost = probe.mgmt_host;
+      updateExportReportEnabled();
       let resp;
       try {
         resp = await fetch("/api/probe-tests/run", {
@@ -3440,6 +3678,15 @@ network_VLAN_1003 1003"></textarea>
           if (!line.trim()) continue;
           let evt;
           try { evt = JSON.parse(line); } catch (_) { continue; }
+          // Structured per-VLAN result rows are routed to the report
+          // buffer (so Export report has them) and NOT into the human
+          // log pane, since their human-readable form is already in the
+          // ok/warn/error lines that precede them.
+          if (evt.event === "vlan_result") {
+            reportState.rows.push(evt);
+            updateExportReportEnabled();
+            continue;
+          }
           addLog(evt.level || "info", evt.msg || "");
           if (evt.level === "ok") okCount++;
           else if (evt.level === "error") failCount++;
@@ -3478,6 +3725,8 @@ network_VLAN_1003 1003"></textarea>
       $("btn-create").addEventListener("click", doCreate);
       $("btn-clear-log").addEventListener("click", clearLog);
       $("btn-download-log").addEventListener("click", downloadLog);
+      $("btn-export-report").addEventListener("click", exportRunReport);
+      updateExportReportEnabled();
       refreshLogCount();
 
       document.querySelectorAll('input[name="src-kind"]').forEach((el) => {
@@ -3563,8 +3812,8 @@ network_VLAN_1003 1003"></textarea>
       setupUpdateButton();
 
       // Mode toggle + probe orchestration card 7
-      const modePill = $("mode-pill");
-      if (modePill) modePill.addEventListener("click", flipMode);
+      const flipBtn = $("btn-to-probe");
+      if (flipBtn) flipBtn.addEventListener("click", flipMode);
       loadMode();
 
       $("btn-probe-register").addEventListener("click", registerProbe);
@@ -3573,6 +3822,13 @@ network_VLAN_1003 1003"></textarea>
       $("btn-probe-save-nic").addEventListener("click", saveProbeNicSelection);
       $("btn-probe-run").addEventListener("click", runProbeTests);
       $("probe-vm-uuid").addEventListener("input", updateProbeFetchNicsEnabled);
+      $("btn-probe-vm-load").addEventListener("click", loadProbeVms);
+      $("probe-vm-select").addEventListener("change", (ev) => {
+        const v = (ev.target.value || "").trim();
+        if (!v) return;
+        $("probe-vm-uuid").value = v;
+        updateProbeFetchNicsEnabled();
+      });
       updateProbeFetchNicsEnabled();
       $("cluster-select").addEventListener("change", () => {
         updateRunProbesButton();
@@ -3597,7 +3853,7 @@ network_VLAN_1003 1003"></textarea>
       });
       $("btn-probe-add-selected").addEventListener("click", addSelectedSubnetsToRows);
       $("btn-probe-subnet-pick-close").addEventListener("click", () => {
-        $("probe-subnet-pick-wrap").style.display = "none";
+        setSubnetPickerOpen(false);
       });
       $("btn-probe-csv-import").addEventListener("click", () => {
         $("probe-csv-file").value = "";
@@ -3607,6 +3863,7 @@ network_VLAN_1003 1003"></textarea>
         const f = ev.target.files && ev.target.files[0];
         if (f) importProbeCsv(f);
       });
+      $("btn-probe-csv-export").addEventListener("click", exportProbeRowsCsv);
 
       // Probe agent panel
       $("btn-probe-token-reveal").addEventListener("click", revealProbeToken);

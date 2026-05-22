@@ -568,6 +568,86 @@ def _find_subnet_extid_for_vlan(
 # ---------------------------------------------------------------------------
 
 
+def _pc_list_vms(
+    session: requests.Session,
+    base_url: str,
+    cluster_ext_id: str | None,
+    *,
+    page_limit: int = 100,
+    max_pages: int = 50,
+) -> list[dict[str, Any]]:
+    """Walk PC v4 ``GET /api/vmm/v4.0/ahv/config/vms`` and return a flat
+    projection of [{extId, name, cluster_ext_id}] for the VM picker UI.
+
+    When ``cluster_ext_id`` is set we narrow server-side with ``$filter``
+    so we don't drag every VM across the wire on big PCs. We also stop as
+    soon as a page comes back short, since ``totalAvailableResults`` is
+    not always present on older PC v4 builds."""
+    out: list[dict[str, Any]] = []
+    page = 0
+    while page < max_pages:
+        params: dict[str, Any] = {"$page": page, "$limit": page_limit}
+        if cluster_ext_id:
+            # OData v4 filter on the embedded cluster reference. PC accepts
+            # both quoted (string) and bare (extId) forms; quoted is safer
+            # across builds.
+            params["$filter"] = f"cluster/extId eq '{cluster_ext_id}'"
+        r = session.get(
+            f"{base_url}/api/vmm/v4.0/ahv/config/vms",
+            params=params,
+            timeout=30,
+        )
+        if r.status_code >= 400:
+            raise RuntimeError(
+                f"GET vms (page {page}) failed HTTP {r.status_code}: {r.text[:200]}"
+            )
+        try:
+            envelope = r.json() or {}
+        except ValueError:
+            envelope = {}
+        data = envelope.get("data") or []
+        if not isinstance(data, list):
+            data = []
+        for vm in data:
+            if not isinstance(vm, dict):
+                continue
+            cluster = vm.get("cluster") or {}
+            out.append({
+                "extId": vm.get("extId"),
+                "name": vm.get("name") or "(unnamed)",
+                "cluster_ext_id": cluster.get("extId"),
+            })
+        if len(data) < page_limit:
+            break
+        page += 1
+    return out
+
+
+@master_probe_bp.post("/api/probes/vm-list")
+def api_probes_vm_list() -> Any:
+    """List VMs from the connected target PC for the probe-VM picker.
+
+    The UI calls this in lieu of the operator hunting the probe VM in
+    Prism Central, copying the UUID, pasting it into the input. Filters
+    server-side by cluster_uuid when one is supplied so the dropdown
+    stays manageable on large PCs."""
+    body = request.get_json(force=True, silent=True) or {}
+    target_token = body.get("target_token")
+    cluster_uuid = (body.get("cluster_uuid") or "").strip() or None
+    sess = _app._get_session(target_token)
+    if not sess:
+        return jsonify(error="not connected to target PC"), 401
+    s = _app._make_pc_session(sess["auth"])
+    try:
+        vms = _pc_list_vms(s, sess["base_url"], cluster_uuid)
+    except RuntimeError as exc:
+        return jsonify(error=str(exc)), 502
+    except requests.RequestException as exc:
+        return jsonify(error=f"request failed: {exc}"), 502
+    vms.sort(key=lambda v: (v.get("name") or "").lower())
+    return jsonify(vms=vms, cluster_uuid=cluster_uuid)
+
+
 @master_probe_bp.post("/api/probes/vm-nics")
 def api_probes_vm_nics() -> Any:
     body = request.get_json(force=True, silent=True) or {}
@@ -625,10 +705,24 @@ def api_probe_tests_run() -> Any:
     def emit(level: str, msg: str) -> str:
         return json.dumps({"level": level, "msg": msg}) + "\n"
 
+    def emit_result(**fields: Any) -> str:
+        """Structured per-VLAN row for the UI's Export report CSV.
+
+        ``level`` is set to a sentinel ("result") so the client's existing
+        log renderer can ignore it (it's intended for the report buffer
+        only, not the human-readable log pane). The shape matches the 8
+        columns the user asked for, with a couple of extras (subnet_ext,
+        nic_ext_id, vlan, run_ts) that make the CSV self-describing if
+        re-imported into a spreadsheet later."""
+        payload = {"level": "result", "event": "vlan_result"}
+        payload.update(fields)
+        return json.dumps(payload) + "\n"
+
     def gen():
         ok_count = 0
         partial_count = 0
         fail_count = 0
+        run_ts = time.time()
         yield emit("system", f"Probe-test run against probe '{probe.get('name')}' ({probe['mgmt_host']}).")
         yield emit("info", f"Probe VM UUID: {probe.get('probe_vm_uuid')}, test NIC: {probe.get('test_nic_ext_id')}")
 
@@ -647,23 +741,54 @@ def api_probe_tests_run() -> Any:
 
         for net in networks:
             name = (net or {}).get("name") or "(unnamed)"
+            # Seed the result row up front so every terminal branch
+            # (skip / NIC-swap fail / configure fail / partial / pass)
+            # can emit a row with the fields it knows about.
+            row: dict[str, Any] = {
+                "run_ts": run_ts,
+                "subnet_name": name,
+                "vlan": None,
+                "subnet_ext_id": None,
+                "test_nic_ext_id": probe.get("test_nic_ext_id"),
+                "test_iface": effective_test_iface,
+                "guest_ip": None,
+                "prefix": None,
+                "gateway": None,
+                "external_ip": None,
+                "gateway_ping": "SKIP",
+                "external_ping": "SKIP",
+                "status": "FAIL",
+                "detail": "",
+            }
+
             try:
                 vlan = int((net or {}).get("vlan"))
+                row["vlan"] = vlan
             except (TypeError, ValueError):
                 yield emit("error", f"  {name}: invalid VLAN; skipping")
+                row["detail"] = "invalid VLAN"
+                yield emit_result(**row)
                 fail_count += 1
                 continue
             test_ip = (net or {}).get("test_ip") or ""
             try:
                 prefix = int((net or {}).get("prefix"))
+                row["prefix"] = prefix
             except (TypeError, ValueError):
                 yield emit("error", f"  {name}: invalid prefix; skipping")
+                row["detail"] = "invalid prefix"
+                yield emit_result(**row)
                 fail_count += 1
                 continue
             gateway = (net or {}).get("gateway") or ""
             external_ip = (net or {}).get("external_ip") or ""
+            row["guest_ip"] = test_ip
+            row["gateway"] = gateway
+            row["external_ip"] = external_ip
             if not test_ip or not gateway:
                 yield emit("error", f"  {name}: test_ip and gateway are required; skipping")
+                row["detail"] = "missing test_ip or gateway"
+                yield emit_result(**row)
                 fail_count += 1
                 continue
 
@@ -671,8 +796,11 @@ def api_probe_tests_run() -> Any:
             subnet_ext = _find_subnet_extid_for_vlan(pc_session, base_url, cluster_uuid, vlan)
             if not subnet_ext:
                 yield emit("error", f"  no subnet on this cluster matches VLAN {vlan}; skipping")
+                row["detail"] = f"no subnet matches VLAN {vlan}"
+                yield emit_result(**row)
                 fail_count += 1
                 continue
+            row["subnet_ext_id"] = subnet_ext
             yield emit("info", f"  subnet extId: {subnet_ext}")
 
             yield emit("info", f"  pointing probe NIC {probe['test_nic_ext_id']} at this subnet...")
@@ -683,6 +811,8 @@ def api_probe_tests_run() -> Any:
                 )
             except (RuntimeError, requests.RequestException) as exc:
                 yield emit("error", f"  PC NIC swap failed: {exc}")
+                row["detail"] = f"PC NIC swap failed: {exc}"
+                yield emit_result(**row)
                 fail_count += 1
                 continue
 
@@ -705,6 +835,8 @@ def api_probe_tests_run() -> Any:
                 )
             except requests.RequestException as exc:
                 yield emit("error", f"  probe /configure failed: {exc}")
+                row["detail"] = f"probe /configure transport failed: {exc}"
+                yield emit_result(**row)
                 fail_count += 1
                 continue
             try:
@@ -722,6 +854,8 @@ def api_probe_tests_run() -> Any:
                     f"status={r.status_code} error={conf.get('error')} "
                     f"sent_token={_tok_fp(probe.get('token') or '')}",
                 )
+                row["detail"] = f"/configure rejected (HTTP {r.status_code}): {conf.get('error')}"
+                yield emit_result(**row)
                 fail_count += 1
                 continue
             yield emit("ok", f"    backend={conf.get('backend')}")
@@ -740,6 +874,8 @@ def api_probe_tests_run() -> Any:
                 )
             except requests.RequestException as exc:
                 yield emit("error", f"  probe /run-test failed: {exc}")
+                row["detail"] = f"probe /run-test transport failed: {exc}"
+                yield emit_result(**row)
                 fail_count += 1
                 continue
             try:
@@ -747,18 +883,31 @@ def api_probe_tests_run() -> Any:
             except ValueError:
                 res = {"gateway_ok": False, "external_ok": False, "raw": r.text[:200]}
 
+            row["gateway_ping"] = "PASS" if res.get("gateway_ok") else "FAIL"
+            if external_ip:
+                row["external_ping"] = "PASS" if res.get("external_ok") else "FAIL"
+            else:
+                row["external_ping"] = "SKIP"
+
             gw_part = "gw OK" if res.get("gateway_ok") else "gw FAIL"
             ext_part = "external OK" if res.get("external_ok") else ("external FAIL" if external_ip else "external skipped")
             if res.get("gateway_ok") and (res.get("external_ok") or not external_ip):
                 yield emit("ok", f"  PASS: VLAN {vlan} ({name}) — {gw_part}, {ext_part}")
+                row["status"] = "PASS"
                 ok_count += 1
             elif res.get("gateway_ok"):
                 yield emit("warn", f"  PARTIAL: VLAN {vlan} ({name}) — {gw_part}, {ext_part}")
+                row["status"] = "PARTIAL"
+                row["detail"] = "gateway OK, external FAIL"
                 partial_count += 1
             else:
                 gw_raw = ((res.get("gateway") or {}).get("raw") or "")[:200]
                 yield emit("error", f"  FAIL: VLAN {vlan} ({name}) — {gw_part}: {gw_raw}")
+                row["status"] = "FAIL"
+                row["detail"] = f"gateway ping failed: {gw_raw}"
                 fail_count += 1
+
+            yield emit_result(**row)
 
         total = len(networks)
         yield emit(

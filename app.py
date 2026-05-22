@@ -67,7 +67,7 @@ if __name__ == "__main__" and "app" not in sys.modules:
     sys.modules["app"] = sys.modules[__name__]
 
 __version__ = "0.2.0"
-BUILD = 29   # bump on every commit
+BUILD = 30   # bump on every commit
 
 app = Flask(__name__)
 
