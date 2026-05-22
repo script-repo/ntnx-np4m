@@ -1056,6 +1056,7 @@ network_VLAN_1003 1003"></textarea>
           <div class="reveal-row">
             <code id="probe-token-display">&mdash;</code>
             <button type="button" class="secondary" id="btn-probe-token-reveal" disabled>Reveal</button>
+            <button type="button" class="secondary" id="btn-probe-token-set" disabled title="Paste a token the probe already has (e.g. one you generated from the probe's own page).">Set...</button>
             <button type="button" class="secondary" id="btn-probe-token-rotate" disabled title="Generate a new token on the probe and store it here.">Rotate</button>
           </div>
         </div>
@@ -3112,6 +3113,7 @@ network_VLAN_1003 1003"></textarea>
       const p = probeState.probes.find((x) => x.id === probeState.selectedId);
       const hasProbe = !!p;
       $("btn-probe-token-reveal").disabled = !hasProbe;
+      $("btn-probe-token-set").disabled = !hasProbe;
       $("btn-probe-token-rotate").disabled = !hasProbe;
       $("probe-cfg-mgmt-iface").disabled = !hasProbe;
       $("probe-cfg-test-iface").disabled = !hasProbe;
@@ -3143,6 +3145,34 @@ network_VLAN_1003 1003"></textarea>
         updateProbeAgentPanel();
       } catch (e) {
         addLog("error", `Token reveal failed: ${e.message}`);
+      }
+    }
+
+    async function setProbeToken() {
+      const p = probeState.probes.find((x) => x.id === probeState.selectedId);
+      if (!p) return;
+      const current = probeState._cachedToken || "";
+      const next = prompt(
+        "Paste the bearer token the probe currently expects.\n" +
+        "Use this when you rotated the token from the probe's own page, " +
+        "or copied it out of band.\n\n" +
+        "Leave empty to clear (probe will be treated as open).",
+        current
+      );
+      if (next === null) return;
+      $("btn-probe-token-set").disabled = true;
+      try {
+        await postJson("/api/probes/update", {
+          probe_id: p.id, token: next || "",
+        });
+        probeState._cachedToken = next || "";
+        addLog("ok", `Stored bearer token for probe '${p.name}' updated.`);
+        await loadProbes();
+        selectProbe(p.id);
+      } catch (e) {
+        addLog("error", `Set token failed: ${e.message}`);
+      } finally {
+        updateProbeAgentPanel();
       }
     }
 
@@ -3507,6 +3537,7 @@ network_VLAN_1003 1003"></textarea>
 
       // Probe agent panel
       $("btn-probe-token-reveal").addEventListener("click", revealProbeToken);
+      $("btn-probe-token-set").addEventListener("click", setProbeToken);
       $("btn-probe-token-rotate").addEventListener("click", rotateProbeToken);
       $("btn-probe-cfg-refresh").addEventListener("click", refreshProbeConfig);
       $("btn-probe-cfg-save").addEventListener("click", saveProbeConfig);
