@@ -128,7 +128,29 @@
     .logline.error { color: var(--err); }
     .logline.warn  { color: var(--warn); }
     .logline .ts   { color: var(--muted); margin-right: 8px; }
-    .actions { display: flex; gap: 10px; align-items: center; margin-top: 4px; }
+    .actions { display: flex; gap: 10px; align-items: center; margin-top: 4px; flex-wrap: wrap; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; }
+    .field { display: flex; flex-direction: column; flex: 1 1 200px; min-width: 160px; }
+    .field label { font-size: 11.5px; color: var(--muted); font-weight: 600; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.4px; }
+    .field input, .field input[type="text"] {
+      background: #0b0f15; color: var(--text);
+      border: 1px solid var(--border); border-radius: 6px;
+      padding: 7px 10px; font-size: 13px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .field input:disabled { opacity: 0.55; cursor: not-allowed; }
+    .banner { padding: 10px 14px; border-radius: 6px; font-size: 12.5px; }
+    .banner.warn { background: #3a2a07; border: 1px solid #92560a; color: #fde68a; }
+    .banner.ok { background: #052e1d; border: 1px solid #0a6e3f; color: #a7f3d0; }
+    .reveal-box {
+      background: #0b0f15; border: 1px solid var(--accent); border-radius: 6px;
+      padding: 10px 12px; margin-top: 8px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12.5px; word-break: break-all;
+      display: flex; gap: 10px; align-items: center;
+    }
+    .reveal-box code { flex: 1 1 auto; color: var(--accent); }
+    .muted { color: var(--muted); font-size: 12px; }
   </style>
 </head>
 <body>
@@ -144,6 +166,46 @@
   </header>
 
   <main>
+    <section class="card">
+      <h2>Bearer token</h2>
+      <div id="token-banner" class="banner warn" style="margin-bottom:10px;">Loading...</div>
+
+      <div class="row">
+        <div class="field">
+          <label for="session-token">Session token (paste current token to unlock writes)</label>
+          <input type="password" id="session-token" autocomplete="off" placeholder="paste here, then click anywhere to apply" />
+        </div>
+        <div class="actions">
+          <button id="btn-token-rotate" disabled>Generate / rotate</button>
+        </div>
+      </div>
+      <div id="token-reveal" style="display:none;" class="reveal-box">
+        <code id="token-reveal-value"></code>
+        <button class="secondary" id="btn-token-copy">Copy</button>
+        <button class="secondary" id="btn-token-hide">Hide</button>
+      </div>
+      <div class="muted" style="margin-top:6px;" id="token-meta">&mdash;</div>
+    </section>
+
+    <section class="card">
+      <h2>Interface roles</h2>
+      <div class="row">
+        <div class="field">
+          <label for="cfg-mgmt-iface">Management iface (do not touch in tests)</label>
+          <input type="text" id="cfg-mgmt-iface" autocomplete="off" placeholder="e.g. eth0" />
+        </div>
+        <div class="field">
+          <label for="cfg-test-iface">Test iface (master will reconfigure this per VLAN)</label>
+          <input type="text" id="cfg-test-iface" autocomplete="off" placeholder="e.g. eth1" />
+        </div>
+        <div class="actions">
+          <button id="btn-cfg-save" disabled>Save</button>
+          <button class="secondary" id="btn-cfg-refresh">Refresh</button>
+        </div>
+      </div>
+      <div class="muted" style="margin-top:6px;" id="cfg-meta">Stored in <code>~/.np4m-probe.json</code> on the probe. Survives agent restart.</div>
+    </section>
+
     <section class="card">
       <h2>Health</h2>
       <div class="grid" id="health-grid">
@@ -181,10 +243,122 @@
 
   <script>
     const $ = (id) => document.getElementById(id);
+    const state = {
+      authRequired: null,    // null = unknown, true/false from health
+      sessionToken: "",      // captured by user paste OR last rotate
+    };
 
     function fmtTs(ts) {
       if (!ts) return "";
       try { return new Date(ts * 1000).toLocaleTimeString(); } catch (_) { return ""; }
+    }
+
+    function authHeaders() {
+      const h = { "Content-Type": "application/json" };
+      if (state.sessionToken) h["Authorization"] = "Bearer " + state.sessionToken;
+      return h;
+    }
+
+    function updateAuthGates() {
+      const tokenSet = state.authRequired === true;
+      const banner = $("token-banner");
+      if (state.authRequired === null) {
+        banner.className = "banner warn";
+        banner.textContent = "Loading\u2026";
+      } else if (tokenSet) {
+        banner.className = "banner ok";
+        banner.textContent = "Bearer token is configured. Paste it above to unlock changes from this browser.";
+      } else {
+        banner.className = "banner warn";
+        banner.textContent = "PROBE IS OPEN. No bearer token is configured \u2014 anyone reachable on the mgmt NIC can drive this probe. Click \u201CGenerate / rotate\u201D to set one.";
+      }
+
+      // Writes are always allowed when the probe is open (auth_required=false);
+      // when a token is set, the session-token input must contain something.
+      const canWrite = (state.authRequired === false) || !!state.sessionToken;
+      $("btn-cfg-save").disabled = !canWrite;
+      $("btn-token-rotate").disabled = !canWrite;
+      $("btn-token-rotate").textContent = tokenSet ? "Rotate" : "Generate";
+    }
+
+    function setSessionToken(t, opts) {
+      state.sessionToken = (t || "").trim();
+      const sti = $("session-token");
+      if (opts && opts.fill) sti.value = state.sessionToken;
+      updateAuthGates();
+    }
+
+    async function rotateToken() {
+      const isRotate = state.authRequired === true;
+      const verb = isRotate ? "Rotate" : "Generate";
+      const confirmMsg = isRotate
+        ? "Rotate the bearer token? The current token will stop working immediately, and any master that has it stored must be updated."
+        : "Generate a bearer token? The probe is currently OPEN; this will require Bearer auth for all writes afterwards.";
+      if (!confirm(confirmMsg)) return;
+      $("btn-token-rotate").disabled = true;
+      try {
+        const r = await fetch("/probe/token/rotate", { method: "POST", headers: authHeaders(), body: "{}" });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.error || ("HTTP " + r.status));
+        const t = j.token || "";
+        if (!t) throw new Error("probe returned no token");
+        setSessionToken(t, { fill: true });
+        $("token-reveal-value").textContent = t;
+        $("token-reveal").style.display = "";
+        $("token-meta").textContent = `${verb} succeeded ${new Date().toLocaleTimeString()}. Copy the token now \u2014 it is not retrievable later. Don\u2019t forget to update the master\u2019s registration.`;
+        // Reload health so auth_required flips to true on the UI.
+        await loadHealth();
+      } catch (e) {
+        $("token-meta").textContent = `${verb} failed: ${e.message}`;
+        updateAuthGates();
+      }
+    }
+
+    async function loadConfig() {
+      const meta = $("cfg-meta");
+      try {
+        const r = await fetch("/probe/config", { headers: authHeaders() });
+        if (r.status === 401) {
+          meta.textContent = "Paste the current bearer token above to read this probe\u2019s persisted config.";
+          $("cfg-mgmt-iface").disabled = true;
+          $("cfg-test-iface").disabled = true;
+          return;
+        }
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        const j = await r.json();
+        $("cfg-mgmt-iface").value = j.mgmt_iface || "";
+        $("cfg-test-iface").value = j.test_iface || "";
+        $("cfg-mgmt-iface").disabled = false;
+        $("cfg-test-iface").disabled = false;
+        meta.innerHTML = `Persisted in <code>${j.config_path || "~/.np4m-probe.json"}</code>. Survives agent restart.`;
+      } catch (e) {
+        meta.textContent = "Config read failed: " + e.message;
+      }
+    }
+
+    async function saveConfig() {
+      const mgmt = $("cfg-mgmt-iface").value.trim();
+      const test = $("cfg-test-iface").value.trim();
+      if (mgmt && test && mgmt === test) {
+        $("cfg-meta").textContent = "mgmt iface and test iface must differ.";
+        return;
+      }
+      $("btn-cfg-save").disabled = true;
+      try {
+        const r = await fetch("/probe/config", {
+          method: "POST",
+          headers: authHeaders(),
+          body: JSON.stringify({ mgmt_iface: mgmt, test_iface: test }),
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.error || ("HTTP " + r.status));
+        $("cfg-meta").innerHTML = `Saved ${new Date().toLocaleTimeString()}: mgmt=<code>${j.mgmt_iface || "(unset)"}</code> test=<code>${j.test_iface || "(unset)"}</code>.`;
+        await loadHealth();
+      } catch (e) {
+        $("cfg-meta").textContent = "Save failed: " + e.message;
+      } finally {
+        updateAuthGates();
+      }
     }
 
     async function loadHealth() {
@@ -242,6 +416,8 @@
           ifaceTbody.appendChild(tr);
         });
         meta.textContent = `Refreshed ${new Date().toLocaleTimeString()}.`;
+        state.authRequired = !!j.auth_required;
+        updateAuthGates();
       } catch (e) {
         meta.textContent = "Health failed: " + e.message;
       }
@@ -291,7 +467,31 @@
       $("btn-refresh-health").addEventListener("click", loadHealth);
       $("btn-refresh-logs").addEventListener("click", loadLogs);
       $("btn-to-master").addEventListener("click", switchToMaster);
-      loadHealth();
+
+      $("btn-cfg-save").addEventListener("click", saveConfig);
+      $("btn-cfg-refresh").addEventListener("click", loadConfig);
+      $("btn-token-rotate").addEventListener("click", rotateToken);
+      $("btn-token-copy").addEventListener("click", async () => {
+        const v = $("token-reveal-value").textContent || "";
+        try {
+          await navigator.clipboard.writeText(v);
+          $("token-meta").textContent = "Token copied to clipboard.";
+        } catch (_) {
+          $("token-meta").textContent = "Copy failed \u2014 select the value manually.";
+        }
+      });
+      $("btn-token-hide").addEventListener("click", () => {
+        $("token-reveal").style.display = "none";
+      });
+      $("session-token").addEventListener("input", (e) => {
+        setSessionToken(e.target.value, { fill: false });
+      });
+      $("session-token").addEventListener("change", (e) => {
+        setSessionToken(e.target.value, { fill: false });
+        loadConfig();
+      });
+
+      loadHealth().then(() => loadConfig());
       loadLogs();
       setInterval(loadHealth, 10000);
       setInterval(loadLogs, 5000);
