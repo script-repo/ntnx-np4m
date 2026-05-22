@@ -67,7 +67,7 @@ if __name__ == "__main__" and "app" not in sys.modules:
     sys.modules["app"] = sys.modules[__name__]
 
 __version__ = "0.2.0"
-BUILD = 26   # bump on every commit
+BUILD = 27   # bump on every commit
 
 app = Flask(__name__)
 
@@ -633,30 +633,66 @@ def api_self_update_preflight():
 
 
 def _schedule_master_sigterm(delay: float = 2.0) -> None:
-    """Restart the running python process in place after `delay`s, so a
-    fresh interpreter loads whatever was just `git reset --hard`'d.
+    """Pick the right restart mechanism for whatever supervisor (or lack
+    thereof) is babysitting this process, then trigger it after `delay`s.
 
-    Earlier versions sent SIGTERM to the parent in the hope that systemd
-    (or gunicorn) would respawn the worker. That only works under an
-    actual supervisor; the lab deployment runs under plain
-    ``sudo nohup python app.py`` so the parent is sudo, killing it just
-    leaves the python child running the OLD code while the operator
-    thinks the update applied. ``os.execv`` replaces the current process
-    image, keeps the same PID, and inherits the full env block, so the
-    bearer token, mgmt iface, etc. survive the bounce."""
+    Two real-world deployment shapes are handled:
+
+    1. systemd + gunicorn (production): ppid is the gunicorn master,
+       which is itself the systemd unit's main process. SIGTERM the
+       gunicorn master; gunicorn shuts down its workers and exits; the
+       systemd ``Restart=always`` line brings the whole service back
+       with the new code.
+
+    2. Plain ``sudo nohup python app.py`` (lab/debug deploys): ppid is
+       sudo, which is NOT a supervisor — killing it just orphans the
+       python child with stale code. Use ``os.execv`` to re-exec the
+       interpreter in place; PID is preserved, the env block is
+       inherited, and the new code is loaded.
+
+    Anything else falls back to in-place re-exec, which is the safer
+    of the two (a worst-case Python crash is recoverable; a silently
+    stale agent is not).
+    """
     def _kick():
         time.sleep(delay)
+        ppid = os.getppid()
+        ppid_cmdline = ""
+        try:
+            with open(f"/proc/{ppid}/cmdline", "rb") as f:
+                ppid_cmdline = f.read().replace(b"\x00", b" ").decode(
+                    "utf-8", errors="replace"
+                )
+        except Exception:
+            pass
+        # gunicorn master / systemd directly / any well-known supervisor:
+        # send SIGTERM and let it respawn us with fresh code.
+        is_supervised = (
+            "gunicorn" in ppid_cmdline
+            or "/usr/lib/systemd" in ppid_cmdline
+            or ppid_cmdline.startswith("systemd ")
+            or ppid == 1
+        )
+        if is_supervised:
+            try:
+                os.kill(ppid, signal.SIGTERM)
+                return
+            except Exception as exc:
+                print(
+                    f"np4m self-update: SIGTERM ppid={ppid} failed: {exc}",
+                    file=sys.stderr, flush=True,
+                )
         try:
             python = sys.executable or "python3"
-            # sys.argv[0] is "app.py" (or absolute); pass the rest through
-            # so --mode probe etc. survives the re-exec.
             argv = [python, os.path.abspath(sys.argv[0])] + list(sys.argv[1:])
             os.execv(python, argv)
         except Exception as exc:
-            print(f"np4m self-update: re-exec failed: {exc}", file=sys.stderr, flush=True)
-            # Fall back to the old behaviour as a last resort.
+            print(
+                f"np4m self-update: re-exec failed: {exc}",
+                file=sys.stderr, flush=True,
+            )
             try:
-                os.kill(os.getppid(), signal.SIGTERM)
+                os.kill(ppid, signal.SIGTERM)
             except Exception:
                 pass
     threading.Thread(target=_kick, daemon=True).start()
