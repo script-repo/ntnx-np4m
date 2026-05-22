@@ -21,8 +21,8 @@ the master streams back to the UI can include the raw probe-side context.
 from __future__ import annotations
 
 import hmac
-import os
 import platform
+import secrets
 import socket
 import threading
 import time
@@ -32,11 +32,12 @@ from typing import Any
 from flask import Blueprint, g, jsonify, request
 
 import iface
+import probe_config
 import tester
 
 probe_bp = Blueprint("probe", __name__)
 
-PROBE_TOKEN_ENV = "NP4M_PROBE_TOKEN"
+PROBE_TOKEN_ENV = probe_config.TOKEN_ENV
 DEFAULT_PORT_ENV = "NP4M_PROBE_PORT"
 
 _log_lock = threading.Lock()
@@ -56,7 +57,7 @@ def _record(level: str, msg: str, **extra: Any) -> None:
 
 
 def _expected_token() -> str:
-    return (os.environ.get(PROBE_TOKEN_ENV, "") or "").strip()
+    return (probe_config.get_token() or "").strip()
 
 
 def _check_auth() -> tuple[bool, str | None]:
@@ -191,3 +192,83 @@ def probe_logs() -> Any:
     with _log_lock:
         items = list(_log_buffer)[-limit:]
     return jsonify(logs=items, count=len(items))
+
+
+_VALID_IFACE_CHARS = set(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-",
+)
+
+
+def _valid_iface_name(name: str | None) -> bool:
+    if name is None:
+        return True
+    if not isinstance(name, str):
+        return False
+    n = name.strip()
+    if not n or len(n) > 32:
+        return False
+    return all(c in _VALID_IFACE_CHARS for c in n)
+
+
+@probe_bp.get("/probe/config")
+def probe_config_get() -> Any:
+    """Return the runtime config the operator can change from the master
+    UI. Deliberately does NOT echo the bearer token; the master already
+    holds it (and the operator can rotate via /probe/token/rotate)."""
+    return jsonify(
+        mgmt_iface=iface.get_mgmt_iface(),
+        test_iface=iface.get_test_iface(),
+        auth_required=bool(_expected_token()),
+        token_set=bool(_expected_token()),
+        config_path=probe_config.config_path(),
+    )
+
+
+@probe_bp.post("/probe/config")
+def probe_config_set() -> Any:
+    body = request.get_json(force=True, silent=True) or {}
+    mgmt = body.get("mgmt_iface")
+    test = body.get("test_iface")
+
+    changes: list[str] = []
+    if "mgmt_iface" in body:
+        new_mgmt = (mgmt or "").strip() or None
+        if not _valid_iface_name(new_mgmt):
+            return jsonify(error=f"invalid mgmt_iface name {mgmt!r}"), 400
+        probe_config.set_mgmt_iface(new_mgmt)
+        changes.append(f"mgmt_iface={new_mgmt!r}")
+    if "test_iface" in body:
+        new_test = (test or "").strip() or None
+        if not _valid_iface_name(new_test):
+            return jsonify(error=f"invalid test_iface name {test!r}"), 400
+        # Guard against the operator pointing test_iface at the management
+        # iface — the apply layer also refuses but we want a clearer error.
+        if new_test and new_test == probe_config.get_mgmt_iface():
+            return (
+                jsonify(error="test_iface must differ from mgmt_iface"),
+                400,
+            )
+        probe_config.set_test_iface(new_test)
+        changes.append(f"test_iface={new_test!r}")
+
+    if changes:
+        _record("info", "config update: " + ", ".join(changes))
+    return jsonify(
+        mgmt_iface=iface.get_mgmt_iface(),
+        test_iface=iface.get_test_iface(),
+        auth_required=bool(_expected_token()),
+        token_set=bool(_expected_token()),
+        config_path=probe_config.config_path(),
+        changed=changes,
+    )
+
+
+@probe_bp.post("/probe/token/rotate")
+def probe_token_rotate() -> Any:
+    """Generate a fresh bearer token, persist it, and return it ONCE in
+    the response body. After this call, subsequent writes must present
+    the new token."""
+    new_token = secrets.token_hex(24)
+    probe_config.set_token(new_token)
+    _record("warn", "bearer token rotated by master")
+    return jsonify(token=new_token, auth_required=True)

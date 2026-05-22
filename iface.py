@@ -41,9 +41,12 @@ import socket
 import subprocess
 from typing import Any
 
-# Public so the API layer can surface the configured names in /probe/health.
-MGMT_IFACE_ENV = "NP4M_MGMT_IFACE"
-TEST_IFACE_ENV = "NP4M_TEST_IFACE"
+import probe_config as _probe_config
+
+# Re-exported for backward compatibility with earlier code paths that
+# imported the env-var names from this module.
+MGMT_IFACE_ENV = _probe_config.MGMT_IFACE_ENV
+TEST_IFACE_ENV = _probe_config.TEST_IFACE_ENV
 
 
 class IfaceError(Exception):
@@ -51,13 +54,13 @@ class IfaceError(Exception):
 
 
 def get_mgmt_iface() -> str | None:
-    val = os.environ.get(MGMT_IFACE_ENV, "").strip()
-    return val or None
+    """Persistent config wins, env-var is the seed default."""
+    return _probe_config.get_mgmt_iface()
 
 
 def get_test_iface() -> str | None:
-    val = os.environ.get(TEST_IFACE_ENV, "").strip()
-    return val or None
+    """Persistent config wins, env-var is the seed default."""
+    return _probe_config.get_test_iface()
 
 
 def list_interfaces() -> list[dict[str, Any]]:

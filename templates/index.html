@@ -504,6 +504,78 @@
       main { padding: 16px; }
       .field { min-width: 140px; }
     }
+
+    .tabs {
+      display: flex;
+      gap: 4px;
+      padding: 14px 32px 0;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-panel, #fff);
+      position: sticky;
+      top: 0;
+      z-index: 5;
+    }
+    .tab-btn {
+      background: transparent;
+      border: 1px solid transparent;
+      border-bottom: none;
+      padding: 8px 14px;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--muted);
+      cursor: pointer;
+      border-radius: 6px 6px 0 0;
+      margin-bottom: -1px;
+      transition: background 0.12s, color 0.12s;
+    }
+    .tab-btn:hover { background: rgba(0,0,0,0.04); color: var(--fg, #111); }
+    .tab-btn.active {
+      background: var(--bg, #fff);
+      border-color: var(--border);
+      border-bottom-color: var(--bg, #fff);
+      color: var(--accent, #2563eb);
+    }
+    .tab-pane { display: none; }
+    .tab-pane.active { display: block; }
+
+    .reveal-row {
+      display: flex; align-items: center; gap: 6px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+    }
+    .reveal-row code {
+      background: rgba(0,0,0,0.05);
+      padding: 4px 8px; border-radius: 4px;
+      word-break: break-all;
+      flex: 1 1 auto;
+    }
+    .vlan-pick-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+    .vlan-pick-table th, .vlan-pick-table td {
+      padding: 6px 8px; text-align: left; border-bottom: 1px solid var(--border);
+    }
+    .vlan-pick-table input[type="text"], .vlan-pick-table input[type="number"] {
+      width: 100%; padding: 4px 6px; font-size: 12px;
+      border: 1px solid var(--border); border-radius: 4px;
+      box-sizing: border-box;
+    }
+    .vlan-pick-table th { background: #f9fafb; font-weight: 600; color: var(--muted); }
+    .vlan-pick-table tr.row-invalid input { border-color: #fca5a5; background: #fef2f2; }
+    .vlan-pick-table .vlan-row-name { font-weight: 600; }
+
+    .probe-log-pane {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 11.5px;
+      background: #0f172a; color: #e2e8f0;
+      padding: 10px 12px; border-radius: 6px;
+      max-height: 320px; overflow: auto;
+      white-space: pre-wrap; word-break: break-word;
+    }
+    .probe-log-pane .ts { color: #64748b; }
+    .probe-log-pane .lv-ok { color: #4ade80; }
+    .probe-log-pane .lv-warn { color: #fbbf24; }
+    .probe-log-pane .lv-error { color: #f87171; }
+    .probe-log-pane .lv-info { color: #93c5fd; }
+    .probe-log-pane .lv-system { color: #cbd5e1; }
   </style>
 </head>
 
@@ -525,7 +597,13 @@
     </div>
   </header>
 
+  <div class="tabs" id="tab-strip">
+    <button type="button" class="tab-btn active" data-tab="subnets">Subnets</button>
+    <button type="button" class="tab-btn" data-tab="probe-control">Probe Control</button>
+  </div>
+
   <main>
+    <div class="tab-pane active" data-tab-pane="subnets">
     <!-- Step 1: Connect -->
     <section class="card" id="card-connect">
       <div style="display:flex; align-items:center;">
@@ -879,10 +957,14 @@ network_VLAN_1003 1003"></textarea>
       </div>
     </section>
 
-    <!-- Step 7: Probe orchestration (master mode only) -->
+    </div> <!-- /tab-pane subnets -->
+
+    <div class="tab-pane" data-tab-pane="probe-control">
+
+    <!-- Probe registry card -->
     <section class="card" id="card-probes">
       <div style="display:flex; align-items:center;">
-        <h2>7. Probe orchestration</h2>
+        <h2>Probes</h2>
         <span class="status" id="probes-status"><span class="dot"></span><span class="text">No probes</span></span>
       </div>
       <div class="hint">
@@ -954,6 +1036,49 @@ network_VLAN_1003 1003"></textarea>
           <tbody id="probe-tbody"></tbody>
         </table>
       </div>
+    </section>
+
+    <!-- Probe agent configuration card -->
+    <section class="card" id="card-probe-agent">
+      <div style="display:flex; align-items:center;">
+        <h2>Probe agent</h2>
+        <span class="status" id="probe-agent-status"><span class="dot"></span><span class="text">Pick a probe</span></span>
+      </div>
+      <div class="hint" id="probe-agent-hint">
+        Select a probe above to manage its bearer token and in-guest
+        interface roles. Changes persist on the probe in
+        <code>~/.np4m-probe.json</code> and survive agent restarts.
+      </div>
+
+      <div class="row">
+        <div class="field" style="flex: 2 1 280px;">
+          <label>Bearer token (stored on master)</label>
+          <div class="reveal-row">
+            <code id="probe-token-display">&mdash;</code>
+            <button type="button" class="secondary" id="btn-probe-token-reveal" disabled>Reveal</button>
+            <button type="button" class="secondary" id="btn-probe-token-rotate" disabled title="Generate a new token on the probe and store it here.">Rotate</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:10px;">
+        <div class="field" style="flex: 1 1 180px;">
+          <label for="probe-cfg-mgmt-iface">Management iface (on the probe VM)</label>
+          <input type="text" id="probe-cfg-mgmt-iface" placeholder="e.g. eth0" autocomplete="off" disabled />
+        </div>
+        <div class="field" style="flex: 1 1 180px;">
+          <label for="probe-cfg-test-iface">Test iface (the one the master flips between VLANs)</label>
+          <input type="text" id="probe-cfg-test-iface" placeholder="e.g. eth1" autocomplete="off" disabled />
+        </div>
+        <div class="field" style="flex: 0 0 auto;">
+          <label>&nbsp;</label>
+          <button class="secondary" id="btn-probe-cfg-save" disabled>Save iface roles</button>
+        </div>
+        <div class="field" style="flex: 0 0 auto;">
+          <label>&nbsp;</label>
+          <button class="secondary" id="btn-probe-cfg-refresh" disabled>Refresh from probe</button>
+        </div>
+      </div>
 
       <div class="row" style="margin-top:14px;">
         <div class="field" style="flex: 2 1 320px;">
@@ -975,20 +1100,91 @@ network_VLAN_1003 1003"></textarea>
           <button class="secondary" id="btn-probe-save-nic" disabled>Save selection</button>
         </div>
       </div>
+    </section>
 
-      <div class="row" style="margin-top:14px;">
-        <div class="field" style="flex: 1 1 100%;">
-          <label for="probe-test-iface">In-guest test iface (override; defaults to <code>NP4M_TEST_IFACE</code> on the probe)</label>
-          <input type="text" id="probe-test-iface" placeholder="e.g. ens4" autocomplete="off" />
+    <!-- VLANs to test -->
+    <section class="card" id="card-probe-vlans">
+      <div style="display:flex; align-items:center;">
+        <h2>VLANs to test</h2>
+        <span class="status" id="probe-vlans-status"><span class="dot"></span><span class="text">No VLANs</span></span>
+      </div>
+      <div class="hint">
+        Pick subnets from the connected target cluster, edit each row's
+        test IP / prefix / gateway / optional external IP, then run.
+        You can also bulk-import rows from a CSV (columns:
+        <code>name,vlan,test_ip,prefix,gateway,external_ip</code>;
+        <code>external_ip</code> optional).
+      </div>
+
+      <div class="row" style="margin-top:6px;">
+        <div class="field" style="flex: 0 0 auto;">
+          <label>&nbsp;</label>
+          <button class="secondary" id="btn-probe-load-subnets" disabled>Load subnets from cluster</button>
+        </div>
+        <div class="field" style="flex: 0 0 auto;">
+          <label>&nbsp;</label>
+          <button class="secondary" id="btn-probe-add-blank-row">Add blank row</button>
+        </div>
+        <div class="field" style="flex: 0 0 auto;">
+          <label>&nbsp;</label>
+          <button class="secondary" id="btn-probe-clear-rows">Clear all</button>
+        </div>
+        <div class="field" style="flex: 0 0 auto;">
+          <label>&nbsp;</label>
+          <button class="secondary" id="btn-probe-csv-import">Import CSV...</button>
+          <input type="file" id="probe-csv-file" accept=".csv,text/csv" style="display:none;" />
+        </div>
+        <div class="field" style="flex: 1 1 auto;">
+          <label>&nbsp;</label>
+          <div class="summary-line" id="probe-rows-summary">0 rows, 0 ready to run.</div>
         </div>
       </div>
 
-      <div style="margin-top:14px;">
-        <label for="probe-networks-input" style="font-size:12px; color:var(--muted); font-weight:500;">VLANs to test &mdash; one per line, fields are <code>name,vlan,test_ip,prefix,gateway[,external_ip]</code></label>
-        <textarea id="probe-networks-input" spellcheck="false" placeholder="# example
-mgmt_test,100,10.0.100.50,24,10.0.100.1,8.8.8.8
-storage_test,200,10.0.200.50,24,10.0.200.1,8.8.8.8"></textarea>
-        <div class="summary-line" id="probe-parse-summary">Parsed: 0 valid, 0 issue(s).</div>
+      <div class="source-table-wrap" id="probe-subnet-pick-wrap" style="display:none; margin-top:10px;">
+        <div class="hint" style="margin:0 0 6px;">Tick the subnets to add as test rows below, then press <strong>Add selected</strong>.</div>
+        <table class="vlan-pick-table">
+          <thead>
+            <tr>
+              <th style="width:32px;"><input type="checkbox" id="probe-subnet-pick-all" /></th>
+              <th>Name</th>
+              <th>VLAN</th>
+              <th>IP summary</th>
+            </tr>
+          </thead>
+          <tbody id="probe-subnet-pick-tbody"></tbody>
+        </table>
+        <div class="row" style="margin-top:8px;">
+          <div class="field" style="flex: 0 0 auto;">
+            <button class="secondary" id="btn-probe-add-selected">Add selected</button>
+          </div>
+          <div class="field" style="flex: 0 0 auto;">
+            <button class="secondary" id="btn-probe-subnet-pick-close">Hide picker</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="source-table-wrap" id="probe-rows-wrap" style="margin-top:14px;">
+        <table class="vlan-pick-table" id="probe-rows-table">
+          <thead>
+            <tr>
+              <th style="width:24px;"></th>
+              <th style="width:14%">Name</th>
+              <th style="width:8%">VLAN</th>
+              <th style="width:18%">Test IP</th>
+              <th style="width:8%">Prefix</th>
+              <th style="width:18%">Gateway</th>
+              <th style="width:18%">External IP (optional)</th>
+            </tr>
+          </thead>
+          <tbody id="probe-rows-tbody"></tbody>
+        </table>
+      </div>
+
+      <div class="row" style="margin-top:14px;">
+        <div class="field" style="flex: 1 1 100%;">
+          <label for="probe-test-iface">In-guest test iface override (defaults to the probe's saved test iface)</label>
+          <input type="text" id="probe-test-iface" placeholder="leave blank to use probe-side setting" autocomplete="off" />
+        </div>
       </div>
 
       <div class="actions">
@@ -997,7 +1193,38 @@ storage_test,200,10.0.200.50,24,10.0.200.1,8.8.8.8"></textarea>
       </div>
     </section>
 
-    <!-- Log -->
+    <!-- Probe agent log -->
+    <section class="card" id="card-probe-logs">
+      <div style="display:flex; align-items:center;">
+        <h2>Probe agent log</h2>
+        <span class="status" id="probe-logs-status"><span class="dot"></span><span class="text">&mdash;</span></span>
+      </div>
+      <div class="row" style="margin-top:0;">
+        <div class="field" style="flex: 0 0 auto;">
+          <label>&nbsp;</label>
+          <button class="secondary" id="btn-probe-logs-refresh" disabled>Refresh</button>
+        </div>
+        <div class="field" style="flex: 0 0 auto;">
+          <label class="radio" style="margin-top:18px;">
+            <input type="checkbox" id="probe-logs-autorefresh" checked />
+            <span>Auto-refresh every 4s</span>
+          </label>
+        </div>
+        <div class="field" style="flex: 0 1 110px;">
+          <label for="probe-logs-limit">Lines</label>
+          <input type="number" id="probe-logs-limit" value="200" min="1" max="1024" />
+        </div>
+        <div class="field" style="flex: 1 1 auto;">
+          <label>&nbsp;</label>
+          <div class="summary-line" id="probe-logs-meta">Pick a probe to start streaming logs.</div>
+        </div>
+      </div>
+      <div class="probe-log-pane" id="probe-log-pane"></div>
+    </section>
+
+    </div> <!-- /tab-pane probe-control -->
+
+    <!-- Log (shared between tabs) -->
     <section class="card log-card" id="card-log">
       <div class="log-head">
         <h2>Log</h2>
@@ -2294,7 +2521,7 @@ storage_test,200,10.0.200.50,24,10.0.200.1,8.8.8.8"></textarea>
       // reloaded, we just gray out master-only cards if the operator
       // somehow ends up in probe mode on this page (rare).
       const probeOnlyHide = modeName === "probe";
-      ["card-connect","card-cluster","card-vs","card-source","card-target-subnets","card-networks","card-create","card-probes"].forEach((id) => {
+      ["card-connect","card-cluster","card-vs","card-source","card-target-subnets","card-networks","card-create","card-probes","card-probe-agent","card-probe-vlans","card-probe-logs"].forEach((id) => {
         const el = $(id);
         if (!el) return;
         el.style.opacity = probeOnlyHide ? "0.4" : "";
@@ -2324,13 +2551,43 @@ storage_test,200,10.0.200.50,24,10.0.200.1,8.8.8.8"></textarea>
     }
 
     // -----------------------------------------------------------------
-    // Probe orchestration (card 7)
+    // Tabs (Subnets / Probe Control)
+    // -----------------------------------------------------------------
+    function activateTab(name) {
+      document.querySelectorAll(".tab-btn").forEach((b) => {
+        b.classList.toggle("active", b.dataset.tab === name);
+      });
+      document.querySelectorAll(".tab-pane").forEach((p) => {
+        p.classList.toggle("active", p.dataset.tabPane === name);
+      });
+      probeState.activeTab = name;
+      if (name === "probe-control") {
+        scheduleProbeLogPoll();
+      } else {
+        stopProbeLogPoll();
+      }
+    }
+
+    // -----------------------------------------------------------------
+    // Probe orchestration
     // -----------------------------------------------------------------
     const probeState = {
       probes: [],
       selectedId: null,
-      parsedNetworks: { networks: [], errors: [] },
+      rows: [],            // [{ id, name, vlan, test_ip, prefix, gateway, external_ip }]
+      pickerSubnets: [],   // last fetched subnets for the picker
+      tokenVisible: false,
+      logTimer: null,
+      activeTab: "subnets",
     };
+    let _rowSeq = 1;
+    function _newRow(seed) {
+      const base = {
+        id: "r" + (_rowSeq++) + "-" + Date.now(),
+        name: "", vlan: "", test_ip: "", prefix: 24, gateway: "", external_ip: "",
+      };
+      return Object.assign(base, seed || {});
+    }
 
     async function loadProbes() {
       const tbody = $("probe-tbody");
@@ -2451,7 +2708,6 @@ storage_test,200,10.0.200.50,24,10.0.200.1,8.8.8.8"></textarea>
       nicSel.disabled = true;
       $("btn-probe-save-nic").disabled = true;
       updateProbeFetchNicsEnabled();
-      // Reflect the radio selection in the table.
       document.querySelectorAll("#probe-tbody tr").forEach((tr) => {
         if (tr.dataset.probeId === probeId) tr.classList.add("selected");
         else tr.classList.remove("selected");
@@ -2459,6 +2715,20 @@ storage_test,200,10.0.200.50,24,10.0.200.1,8.8.8.8"></textarea>
       document.querySelectorAll('input[name="probe-sel"]').forEach((r) => {
         r.checked = r.value === probeId;
       });
+      // Pre-fill iface roles from /probe/health so the operator sees what's
+      // currently in effect; the explicit /probe/config call refreshes the
+      // input boxes with the persisted value (which usually matches health,
+      // but is the source of truth for changes).
+      if (p && p.health) {
+        if (p.health.mgmt_iface) $("probe-cfg-mgmt-iface").value = p.health.mgmt_iface;
+        if (p.health.test_iface) $("probe-cfg-test-iface").value = p.health.test_iface;
+      }
+      probeState.tokenVisible = false;
+      probeState._cachedToken = "";
+      $("btn-probe-token-reveal").textContent = "Reveal";
+      updateProbeAgentPanel();
+      refreshProbeConfig();
+      if (probeState.activeTab === "probe-control") scheduleProbeLogPoll();
       updateRunProbesButton();
     }
 
@@ -2575,62 +2845,253 @@ storage_test,200,10.0.200.50,24,10.0.200.1,8.8.8.8"></textarea>
       }
     }
 
-    function parseProbeNetworks() {
-      const text = $("probe-networks-input").value;
-      const networks = [];
-      const errors = [];
+    // -----------------------------------------------------------------
+    // VLAN rows: pick from cluster, edit per-row, import CSV
+    // -----------------------------------------------------------------
+    function validateRow(r) {
+      const errs = [];
+      const ipRe = /^\d+\.\d+\.\d+\.\d+$/;
+      if (!r.name) errs.push("name");
+      const v = parseInt(r.vlan, 10);
+      if (!Number.isInteger(v) || v < 0 || v > 4094) errs.push("vlan");
+      if (!ipRe.test(r.test_ip)) errs.push("test_ip");
+      const px = parseInt(r.prefix, 10);
+      if (!Number.isInteger(px) || px < 1 || px > 32) errs.push("prefix");
+      if (!ipRe.test(r.gateway)) errs.push("gateway");
+      if (r.external_ip && !ipRe.test(r.external_ip)) errs.push("external_ip");
+      return errs;
+    }
+
+    function validRowsForRun() {
+      const out = [];
       const seen = new Set();
-      text.split(/\r?\n/).forEach((raw, idx) => {
-        const line = raw.trim();
-        if (!line || line.startsWith("#")) return;
-        const parts = line.split(/[,\s\t]+/).filter(Boolean);
-        if (parts.length < 5) {
-          errors.push(`Line ${idx+1}: need at least name,vlan,test_ip,prefix,gateway`);
-          return;
-        }
-        const [name, vlanStr, testIp, prefixStr, gateway, externalIp] = parts;
-        const vlan = parseInt(vlanStr, 10);
-        const prefix = parseInt(prefixStr, 10);
-        if (!Number.isInteger(vlan) || vlan < 0 || vlan > 4094) {
-          errors.push(`Line ${idx+1}: invalid VLAN '${vlanStr}'`);
-          return;
-        }
-        if (!Number.isInteger(prefix) || prefix < 1 || prefix > 32) {
-          errors.push(`Line ${idx+1}: invalid prefix '${prefixStr}'`);
-          return;
-        }
-        if (!/^\d+\.\d+\.\d+\.\d+$/.test(testIp)) {
-          errors.push(`Line ${idx+1}: invalid IP '${testIp}'`);
-          return;
-        }
-        if (!/^\d+\.\d+\.\d+\.\d+$/.test(gateway)) {
-          errors.push(`Line ${idx+1}: invalid gateway '${gateway}'`);
-          return;
-        }
-        if (externalIp && !/^\d+\.\d+\.\d+\.\d+$/.test(externalIp)) {
-          errors.push(`Line ${idx+1}: invalid external IP '${externalIp}'`);
-          return;
-        }
-        if (seen.has(name.toLowerCase())) {
-          errors.push(`Line ${idx+1}: duplicate name '${name}'`);
-          return;
-        }
-        seen.add(name.toLowerCase());
-        networks.push({
-          name, vlan,
-          test_ip: testIp,
-          prefix,
-          gateway,
-          external_ip: externalIp || "",
+      for (const r of probeState.rows) {
+        if (validateRow(r).length) continue;
+        const key = (r.name || "").toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({
+          name: r.name,
+          vlan: parseInt(r.vlan, 10),
+          test_ip: r.test_ip,
+          prefix: parseInt(r.prefix, 10),
+          gateway: r.gateway,
+          external_ip: r.external_ip || "",
         });
+      }
+      return out;
+    }
+
+    function renderProbeRows() {
+      const tbody = $("probe-rows-tbody");
+      tbody.innerHTML = "";
+      if (probeState.rows.length === 0) {
+        const tr = document.createElement("tr");
+        const td = document.createElement("td");
+        td.colSpan = 7;
+        td.className = "uplinks";
+        td.style.textAlign = "center";
+        td.style.padding = "16px 8px";
+        td.textContent = "No VLANs yet. Use \u201CLoad subnets from cluster\u201D, \u201CImport CSV\u2026\u201D, or \u201CAdd blank row\u201D.";
+        tr.appendChild(td);
+        tbody.appendChild(tr);
+        updateProbeRowsSummary();
+        return;
+      }
+      probeState.rows.forEach((r) => {
+        const tr = document.createElement("tr");
+        tr.dataset.rowId = r.id;
+        const errs = validateRow(r);
+        if (errs.length) tr.classList.add("row-invalid");
+
+        const tdDel = document.createElement("td");
+        const del = document.createElement("button");
+        del.className = "secondary";
+        del.textContent = "\u00D7";
+        del.title = "Remove row";
+        del.style.padding = "2px 8px";
+        del.addEventListener("click", () => {
+          probeState.rows = probeState.rows.filter((x) => x.id !== r.id);
+          renderProbeRows();
+        });
+        tdDel.appendChild(del);
+        tr.appendChild(tdDel);
+
+        const fields = [
+          { key: "name", type: "text", placeholder: "subnet name" },
+          { key: "vlan", type: "number", placeholder: "100", min: 0, max: 4094 },
+          { key: "test_ip", type: "text", placeholder: "10.0.100.50" },
+          { key: "prefix", type: "number", placeholder: "24", min: 1, max: 32 },
+          { key: "gateway", type: "text", placeholder: "10.0.100.1" },
+          { key: "external_ip", type: "text", placeholder: "8.8.8.8 (optional)" },
+        ];
+        fields.forEach((f) => {
+          const td = document.createElement("td");
+          const input = document.createElement("input");
+          input.type = f.type;
+          input.value = r[f.key] == null ? "" : r[f.key];
+          input.placeholder = f.placeholder;
+          if (f.min !== undefined) input.min = f.min;
+          if (f.max !== undefined) input.max = f.max;
+          input.addEventListener("input", () => {
+            r[f.key] = input.value;
+            const newErrs = validateRow(r);
+            tr.classList.toggle("row-invalid", newErrs.length > 0);
+            updateProbeRowsSummary();
+          });
+          td.appendChild(input);
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
       });
-      probeState.parsedNetworks = { networks, errors };
-      const summary = $("probe-parse-summary");
-      const errPart = errors.length
-        ? ` <span class="err-text">${errors.length} issue(s)</span>: ${errors.slice(0,3).join("; ")}${errors.length > 3 ? "..." : ""}`
-        : "";
-      summary.innerHTML = `Parsed: <strong>${networks.length}</strong> valid,${errPart || " 0 issue(s)."}`;
+      updateProbeRowsSummary();
+    }
+
+    function updateProbeRowsSummary() {
+      const total = probeState.rows.length;
+      const ready = validRowsForRun().length;
+      const meta = $("probe-rows-summary");
+      const status = total - ready;
+      const issue = status > 0 ? ` <span class="err-text">${status} need fixing</span>` : "";
+      meta.innerHTML = `${total} row(s), <strong>${ready}</strong> ready to run.${issue}`;
+      const vlanStatus = $("probe-vlans-status");
+      if (ready > 0) setStatus("probe-vlans-status", "ok", `${ready} ready`);
+      else if (total > 0) setStatus("probe-vlans-status", "err", `${total} incomplete`);
+      else setStatus("probe-vlans-status", null, "No VLANs");
       updateRunProbesButton();
+    }
+
+    async function loadProbeSubnets() {
+      if (!state.token) {
+        addLog("error", "Connect to a target Prism Central first (Subnets tab, step 1).");
+        return;
+      }
+      const cluster = $("cluster-select").value;
+      if (!cluster) {
+        addLog("error", "Pick a target cluster first (Subnets tab, step 2).");
+        return;
+      }
+      const btn = $("btn-probe-load-subnets");
+      btn.disabled = true;
+      try {
+        const res = await postJson("/api/target-subnets", {
+          token: state.token, cluster_uuid: cluster,
+        });
+        probeState.pickerSubnets = (res.subnets || []).filter((s) => s.vlan != null);
+        renderSubnetPicker();
+        $("probe-subnet-pick-wrap").style.display = "";
+        addLog("info", `Loaded ${probeState.pickerSubnets.length} subnet(s) from the cluster.`);
+      } catch (e) {
+        addLog("error", `Could not list cluster subnets: ${e.message}`);
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    function renderSubnetPicker() {
+      const tbody = $("probe-subnet-pick-tbody");
+      tbody.innerHTML = "";
+      const existing = new Set(probeState.rows.map((r) => (r.name || "").toLowerCase()));
+      probeState.pickerSubnets.forEach((s, idx) => {
+        const tr = document.createElement("tr");
+        const tdCk = document.createElement("td");
+        const ck = document.createElement("input");
+        ck.type = "checkbox";
+        ck.dataset.idx = idx;
+        ck.disabled = existing.has((s.name || "").toLowerCase());
+        ck.title = ck.disabled ? "Already added below" : "";
+        tdCk.appendChild(ck);
+        tr.appendChild(tdCk);
+
+        const tdName = document.createElement("td");
+        tdName.textContent = s.name || "(unnamed)";
+        tdName.className = "vlan-row-name";
+        tr.appendChild(tdName);
+
+        const tdVlan = document.createElement("td");
+        tdVlan.textContent = s.vlan == null ? "—" : String(s.vlan);
+        tr.appendChild(tdVlan);
+
+        const tdIp = document.createElement("td");
+        tdIp.className = "uplinks";
+        tdIp.textContent = s.ipSummary || "—";
+        tr.appendChild(tdIp);
+
+        tbody.appendChild(tr);
+      });
+      const pickAll = $("probe-subnet-pick-all");
+      if (pickAll) {
+        pickAll.checked = false;
+        pickAll.onchange = () => {
+          tbody.querySelectorAll('input[type="checkbox"]:not(:disabled)').forEach((c) => {
+            c.checked = pickAll.checked;
+          });
+        };
+      }
+    }
+
+    function addSelectedSubnetsToRows() {
+      const tbody = $("probe-subnet-pick-tbody");
+      const seenNames = new Set(probeState.rows.map((r) => (r.name || "").toLowerCase()));
+      let added = 0;
+      tbody.querySelectorAll('input[type="checkbox"]:checked:not(:disabled)').forEach((ck) => {
+        const idx = parseInt(ck.dataset.idx, 10);
+        const s = probeState.pickerSubnets[idx];
+        if (!s) return;
+        const key = (s.name || "").toLowerCase();
+        if (seenNames.has(key)) return;
+        seenNames.add(key);
+        // Best-effort parse of "10.0.100.0/24 gw 10.0.100.1" into prefix + gateway.
+        let prefix = 24, gateway = "";
+        if (s.ipSummary) {
+          const m = s.ipSummary.match(/\/(\d+)/);
+          if (m) prefix = parseInt(m[1], 10);
+          const gm = s.ipSummary.match(/gw\s+(\d+\.\d+\.\d+\.\d+)/);
+          if (gm) gateway = gm[1];
+        }
+        probeState.rows.push(_newRow({
+          name: s.name || "", vlan: s.vlan, test_ip: "",
+          prefix, gateway, external_ip: "",
+        }));
+        added++;
+      });
+      if (added) addLog("info", `Added ${added} VLAN row(s); fill in the per-row test IP.`);
+      else addLog("info", "Nothing new selected.");
+      renderProbeRows();
+      renderSubnetPicker();
+    }
+
+    function importProbeCsv(file) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const txt = String(reader.result || "");
+        const lines = txt.split(/\r?\n/);
+        let added = 0;
+        const seen = new Set(probeState.rows.map((r) => (r.name || "").toLowerCase()));
+        lines.forEach((raw, lineIdx) => {
+          const line = raw.trim();
+          if (!line || line.startsWith("#")) return;
+          const parts = line.split(",").map((s) => s.trim());
+          // Skip a header row if the second column doesn't parse as an int.
+          if (lineIdx === 0 && parts.length >= 2 && !/^\d+$/.test(parts[1])) {
+            return;
+          }
+          if (parts.length < 5) return;
+          const [name, vlan, test_ip, prefix, gateway, external_ip] = parts;
+          const key = (name || "").toLowerCase();
+          if (!key || seen.has(key)) return;
+          seen.add(key);
+          probeState.rows.push(_newRow({
+            name, vlan, test_ip, prefix,
+            gateway, external_ip: external_ip || "",
+          }));
+          added++;
+        });
+        addLog("info", `CSV imported: ${added} row(s) added.`);
+        renderProbeRows();
+      };
+      reader.onerror = () => addLog("error", "CSV read failed.");
+      reader.readAsText(file);
     }
 
     function updateRunProbesButton() {
@@ -2640,19 +3101,194 @@ storage_test,200,10.0.200.50,24,10.0.200.1,8.8.8.8"></textarea>
         && !!probe
         && !!probe.probe_vm_uuid
         && !!probe.test_nic_ext_id
-        && probeState.parsedNetworks.networks.length > 0;
+        && validRowsForRun().length > 0;
       $("btn-probe-run").disabled = !ok;
+    }
+
+    // -----------------------------------------------------------------
+    // Probe agent panel (token reveal/rotate, mgmt/test iface)
+    // -----------------------------------------------------------------
+    function updateProbeAgentPanel() {
+      const p = probeState.probes.find((x) => x.id === probeState.selectedId);
+      const hasProbe = !!p;
+      $("btn-probe-token-reveal").disabled = !hasProbe;
+      $("btn-probe-token-rotate").disabled = !hasProbe;
+      $("probe-cfg-mgmt-iface").disabled = !hasProbe;
+      $("probe-cfg-test-iface").disabled = !hasProbe;
+      $("btn-probe-cfg-save").disabled = !hasProbe;
+      $("btn-probe-cfg-refresh").disabled = !hasProbe;
+      $("btn-probe-load-subnets").disabled = !state.token || !$("cluster-select").value;
+      const tokenEl = $("probe-token-display");
+      if (!hasProbe) {
+        tokenEl.textContent = "\u2014";
+        $("probe-cfg-mgmt-iface").value = "";
+        $("probe-cfg-test-iface").value = "";
+        setStatus("probe-agent-status", null, "Pick a probe");
+        return;
+      }
+      tokenEl.textContent = probeState.tokenVisible
+        ? (probeState._cachedToken || "(empty)")
+        : "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022 (hidden)";
+      setStatus("probe-agent-status", null, p.name || "probe");
+    }
+
+    async function revealProbeToken() {
+      const p = probeState.probes.find((x) => x.id === probeState.selectedId);
+      if (!p) return;
+      try {
+        const res = await postJson("/api/probes/token-reveal", { probe_id: p.id });
+        probeState._cachedToken = res.token || "";
+        probeState.tokenVisible = !probeState.tokenVisible;
+        $("btn-probe-token-reveal").textContent = probeState.tokenVisible ? "Hide" : "Reveal";
+        updateProbeAgentPanel();
+      } catch (e) {
+        addLog("error", `Token reveal failed: ${e.message}`);
+      }
+    }
+
+    async function rotateProbeToken() {
+      const p = probeState.probes.find((x) => x.id === probeState.selectedId);
+      if (!p) return;
+      if (!confirm(`Rotate the bearer token for '${p.name}'? The probe will accept only the new token after this.`)) return;
+      $("btn-probe-token-rotate").disabled = true;
+      try {
+        const res = await postJson("/api/probes/proxy-token-rotate", { probe_id: p.id });
+        if (res && res.token) {
+          probeState._cachedToken = res.token;
+          probeState.tokenVisible = true;
+          $("btn-probe-token-reveal").textContent = "Hide";
+          addLog("ok", `Probe '${p.name}' token rotated and stored on master.`);
+          updateProbeAgentPanel();
+        } else {
+          addLog("error", `Rotate returned: ${res && res.error ? res.error : "no token in response"}`);
+        }
+      } catch (e) {
+        addLog("error", `Rotate failed: ${e.message}`);
+      } finally {
+        $("btn-probe-token-rotate").disabled = false;
+      }
+    }
+
+    async function refreshProbeConfig() {
+      const p = probeState.probes.find((x) => x.id === probeState.selectedId);
+      if (!p) return;
+      try {
+        const res = await postJson("/api/probes/proxy-config", { probe_id: p.id });
+        $("probe-cfg-mgmt-iface").value = res.mgmt_iface || "";
+        $("probe-cfg-test-iface").value = res.test_iface || "";
+      } catch (e) {
+        addLog("error", `Could not read probe config: ${e.message}`);
+      }
+    }
+
+    async function saveProbeConfig() {
+      const p = probeState.probes.find((x) => x.id === probeState.selectedId);
+      if (!p) return;
+      const mgmt = $("probe-cfg-mgmt-iface").value.trim();
+      const test = $("probe-cfg-test-iface").value.trim();
+      if (mgmt && test && mgmt === test) {
+        addLog("error", "mgmt iface and test iface must differ.");
+        return;
+      }
+      $("btn-probe-cfg-save").disabled = true;
+      try {
+        const res = await postJson("/api/probes/proxy-config-set", {
+          probe_id: p.id, mgmt_iface: mgmt, test_iface: test,
+        });
+        if (res && (res.changed || res.mgmt_iface !== undefined)) {
+          addLog("ok", `Probe '${p.name}' iface roles saved: mgmt=${res.mgmt_iface || "(unset)"} test=${res.test_iface || "(unset)"}`);
+          loadProbes();
+        } else if (res && res.error) {
+          addLog("error", `Save failed: ${res.error}`);
+        }
+      } catch (e) {
+        addLog("error", `Save failed: ${e.message}`);
+      } finally {
+        $("btn-probe-cfg-save").disabled = false;
+      }
+    }
+
+    // -----------------------------------------------------------------
+    // Probe log poller
+    // -----------------------------------------------------------------
+    function fmtLogTs(ts) {
+      try {
+        const d = new Date(ts * 1000);
+        const pad = (n) => (n < 10 ? "0" + n : "" + n);
+        return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+      } catch (_) {
+        return "?";
+      }
+    }
+    async function refreshProbeLogs() {
+      const p = probeState.probes.find((x) => x.id === probeState.selectedId);
+      const pane = $("probe-log-pane");
+      const meta = $("probe-logs-meta");
+      if (!p) {
+        pane.innerHTML = "";
+        meta.textContent = "Pick a probe to start streaming logs.";
+        setStatus("probe-logs-status", null, "\u2014");
+        return;
+      }
+      let limit = parseInt($("probe-logs-limit").value, 10);
+      if (!Number.isInteger(limit) || limit < 1) limit = 200;
+      if (limit > 1024) limit = 1024;
+      try {
+        const res = await postJson("/api/probes/proxy-logs", { probe_id: p.id, limit });
+        const logs = res.logs || [];
+        pane.innerHTML = "";
+        if (logs.length === 0) {
+          pane.textContent = "(no log lines yet)";
+        } else {
+          logs.forEach((l) => {
+            const line = document.createElement("div");
+            const t = document.createElement("span");
+            t.className = "ts";
+            t.textContent = `[${fmtLogTs(l.ts)}] `;
+            const lv = document.createElement("span");
+            lv.className = "lv-" + (l.level || "info");
+            lv.textContent = (l.level || "info").toUpperCase().padEnd(5, " ") + " ";
+            const msg = document.createElement("span");
+            msg.textContent = l.msg || "";
+            line.appendChild(t);
+            line.appendChild(lv);
+            line.appendChild(msg);
+            pane.appendChild(line);
+          });
+          pane.scrollTop = pane.scrollHeight;
+        }
+        meta.textContent = `${logs.length} line(s) from ${p.name}.`;
+        setStatus("probe-logs-status", "ok", `${logs.length} line(s)`);
+      } catch (e) {
+        meta.textContent = `Could not read probe logs: ${e.message}`;
+        setStatus("probe-logs-status", "err", "Unreachable");
+      }
+    }
+
+    function scheduleProbeLogPoll() {
+      stopProbeLogPoll();
+      refreshProbeLogs();
+      if ($("probe-logs-autorefresh").checked) {
+        probeState.logTimer = setInterval(refreshProbeLogs, 4000);
+      }
+    }
+    function stopProbeLogPoll() {
+      if (probeState.logTimer) {
+        clearInterval(probeState.logTimer);
+        probeState.logTimer = null;
+      }
     }
 
     async function runProbeTests() {
       const probe = probeState.probes.find((p) => p.id === probeState.selectedId);
       const clusterUuid = $("cluster-select").value;
+      const networks = validRowsForRun();
       if (!probe || !clusterUuid || !state.token) return;
-      if (probeState.parsedNetworks.networks.length === 0) return;
+      if (networks.length === 0) return;
       $("btn-probe-run").disabled = true;
       setStatus("probe-run-status", "busy", "Running...");
       addLog("system",
-        `Probe-test run: ${probeState.parsedNetworks.networks.length} VLAN(s) via probe '${probe.name}'.`);
+        `Probe-test run: ${networks.length} VLAN(s) via probe '${probe.name}'.`);
       let resp;
       try {
         resp = await fetch("/api/probe-tests/run", {
@@ -2663,7 +3299,7 @@ storage_test,200,10.0.200.50,24,10.0.200.1,8.8.8.8"></textarea>
             target_token: state.token,
             cluster_uuid: clusterUuid,
             test_iface: $("probe-test-iface").value.trim() || undefined,
-            networks: probeState.parsedNetworks.networks,
+            networks: networks,
           }),
         });
       } catch (e) {
@@ -2833,11 +3469,58 @@ storage_test,200,10.0.200.50,24,10.0.200.1,8.8.8.8"></textarea>
       $("btn-probe-fetch-nics").addEventListener("click", fetchProbeNics);
       $("btn-probe-save-nic").addEventListener("click", saveProbeNicSelection);
       $("btn-probe-run").addEventListener("click", runProbeTests);
-      $("probe-networks-input").addEventListener("input", parseProbeNetworks);
       $("probe-vm-uuid").addEventListener("input", updateProbeFetchNicsEnabled);
       updateProbeFetchNicsEnabled();
-      $("cluster-select").addEventListener("change", updateRunProbesButton);
-      parseProbeNetworks();
+      $("cluster-select").addEventListener("change", () => {
+        updateRunProbesButton();
+        updateProbeAgentPanel();
+      });
+
+      // Tab strip
+      document.querySelectorAll(".tab-btn").forEach((btn) => {
+        btn.addEventListener("click", () => activateTab(btn.dataset.tab));
+      });
+
+      // VLAN rows + picker + CSV
+      $("btn-probe-load-subnets").addEventListener("click", loadProbeSubnets);
+      $("btn-probe-add-blank-row").addEventListener("click", () => {
+        probeState.rows.push(_newRow());
+        renderProbeRows();
+      });
+      $("btn-probe-clear-rows").addEventListener("click", () => {
+        if (probeState.rows.length && !confirm("Clear all VLAN rows?")) return;
+        probeState.rows = [];
+        renderProbeRows();
+      });
+      $("btn-probe-add-selected").addEventListener("click", addSelectedSubnetsToRows);
+      $("btn-probe-subnet-pick-close").addEventListener("click", () => {
+        $("probe-subnet-pick-wrap").style.display = "none";
+      });
+      $("btn-probe-csv-import").addEventListener("click", () => {
+        $("probe-csv-file").value = "";
+        $("probe-csv-file").click();
+      });
+      $("probe-csv-file").addEventListener("change", (ev) => {
+        const f = ev.target.files && ev.target.files[0];
+        if (f) importProbeCsv(f);
+      });
+
+      // Probe agent panel
+      $("btn-probe-token-reveal").addEventListener("click", revealProbeToken);
+      $("btn-probe-token-rotate").addEventListener("click", rotateProbeToken);
+      $("btn-probe-cfg-refresh").addEventListener("click", refreshProbeConfig);
+      $("btn-probe-cfg-save").addEventListener("click", saveProbeConfig);
+
+      // Probe log poller
+      $("btn-probe-logs-refresh").addEventListener("click", refreshProbeLogs);
+      $("probe-logs-autorefresh").addEventListener("change", () => {
+        if (probeState.activeTab === "probe-control") scheduleProbeLogPoll();
+        else stopProbeLogPoll();
+      });
+      $("probe-logs-limit").addEventListener("change", refreshProbeLogs);
+
+      renderProbeRows();
+      updateProbeAgentPanel();
       loadProbes();
     });
 

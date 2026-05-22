@@ -182,6 +182,120 @@ def api_probes_health_one() -> Any:
     return jsonify(health=_probe_health_safely(p))
 
 
+def _resolve_probe(body: dict[str, Any]) -> dict[str, Any] | None:
+    probe_id = (body.get("probe_id") or "").strip()
+    with _probes_lock:
+        return dict(PROBES.get(probe_id) or {}) or None
+
+
+@master_probe_bp.post("/api/probes/token-reveal")
+def api_probes_token_reveal() -> Any:
+    """Return the currently-stored bearer token for the given probe.
+    The master is single-tenant + LAN-local, so we don't gate this with
+    its own auth — anyone who can reach the master UI can already read
+    PC credentials too."""
+    body = request.get_json(force=True, silent=True) or {}
+    p = _resolve_probe(body)
+    if p is None:
+        return jsonify(error="probe not found"), 404
+    return jsonify(token=p.get("token") or "")
+
+
+@master_probe_bp.post("/api/probes/proxy-logs")
+def api_probes_proxy_logs() -> Any:
+    body = request.get_json(force=True, silent=True) or {}
+    p = _resolve_probe(body)
+    if p is None:
+        return jsonify(error="probe not found"), 404
+    try:
+        limit = int(body.get("limit") or 200)
+    except (TypeError, ValueError):
+        limit = 200
+    limit = max(1, min(limit, 1024))
+    try:
+        r = _probe_request(p, "GET", f"/probe/logs?limit={limit}", timeout=10)
+    except requests.RequestException as exc:
+        return jsonify(error=f"request failed: {exc}"), 502
+    if r.status_code >= 400:
+        return jsonify(error=f"HTTP {r.status_code}: {r.text[:200]}"), 502
+    try:
+        return jsonify(r.json() or {})
+    except ValueError:
+        return jsonify(error="probe returned non-JSON logs response"), 502
+
+
+@master_probe_bp.post("/api/probes/proxy-config")
+def api_probes_proxy_config_get() -> Any:
+    body = request.get_json(force=True, silent=True) or {}
+    p = _resolve_probe(body)
+    if p is None:
+        return jsonify(error="probe not found"), 404
+    try:
+        r = _probe_request(p, "GET", "/probe/config", timeout=10)
+    except requests.RequestException as exc:
+        return jsonify(error=f"request failed: {exc}"), 502
+    if r.status_code >= 400:
+        return jsonify(error=f"HTTP {r.status_code}: {r.text[:200]}"), 502
+    try:
+        return jsonify(r.json() or {})
+    except ValueError:
+        return jsonify(error="probe returned non-JSON config response"), 502
+
+
+@master_probe_bp.post("/api/probes/proxy-config-set")
+def api_probes_proxy_config_set() -> Any:
+    body = request.get_json(force=True, silent=True) or {}
+    p = _resolve_probe(body)
+    if p is None:
+        return jsonify(error="probe not found"), 404
+    forward: dict[str, Any] = {}
+    for k in ("mgmt_iface", "test_iface"):
+        if k in body:
+            forward[k] = body[k]
+    if not forward:
+        return jsonify(error="nothing to set"), 400
+    try:
+        r = _probe_request(
+            p, "POST", "/probe/config", json_body=forward, timeout=15,
+        )
+    except requests.RequestException as exc:
+        return jsonify(error=f"request failed: {exc}"), 502
+    try:
+        payload = r.json() or {}
+    except ValueError:
+        payload = {"error": f"HTTP {r.status_code}: {r.text[:200]}"}
+    if r.status_code >= 400:
+        return jsonify(payload), r.status_code
+    return jsonify(payload)
+
+
+@master_probe_bp.post("/api/probes/proxy-token-rotate")
+def api_probes_proxy_token_rotate() -> Any:
+    body = request.get_json(force=True, silent=True) or {}
+    probe_id = (body.get("probe_id") or "").strip()
+    with _probes_lock:
+        p = dict(PROBES.get(probe_id) or {})
+    if not p:
+        return jsonify(error="probe not found"), 404
+    try:
+        r = _probe_request(p, "POST", "/probe/token/rotate", json_body={}, timeout=15)
+    except requests.RequestException as exc:
+        return jsonify(error=f"request failed: {exc}"), 502
+    try:
+        payload = r.json() or {}
+    except ValueError:
+        return jsonify(error=f"HTTP {r.status_code}: {r.text[:200]}"), 502
+    if r.status_code >= 400:
+        return jsonify(payload), r.status_code
+    new_token = (payload.get("token") or "").strip()
+    if new_token:
+        with _probes_lock:
+            stored = PROBES.get(probe_id)
+            if stored is not None:
+                stored["token"] = new_token
+    return jsonify(payload)
+
+
 def _probe_health_safely(p: dict[str, Any]) -> dict[str, Any]:
     try:
         r = _probe_request(p, "GET", "/probe/health", timeout=5)

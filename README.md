@@ -864,39 +864,43 @@ Pre-deploy the VM yourself on a cluster the master can reach. Requirements:
 ### Registering and driving probes from the master
 
 1. Start the master in the usual way (`python app.py`) and open the Web
-   UI. The header now shows a **MODE: MASTER** pill — clicking it flips
-   the node to probe mode (rare on a master).
-2. Connect to a target Prism Central in card 1 as you normally would.
-   The probe orchestration uses the *target* PC session to swap the
-   probe VM's NIC subnet, so this step is required.
-3. Scroll to **card 7 — Probe orchestration** and register a probe:
-   - **Name**: free-form label (`probe-cluster-a`).
-   - **Mgmt host / port**: the probe's static management IP and port.
-   - **HTTPS**: pick yes if the probe is serving TLS; otherwise no.
-   - **Bearer token**: paste `NP4M_PROBE_TOKEN` from the probe.
-   - Click **Register probe**. The row's *Health* column should flip to
+   UI. The header shows a **MODE: MASTER** pill (click to flip in-process)
+   and a tab strip just below: **Subnets** for the create flow, **Probe
+   Control** for everything that follows.
+2. Under **Subnets**, connect to a target Prism Central in card 1 and
+   pick a cluster in card 2. The probe orchestration uses that PC
+   session to look up VM NICs / subnets, so this step is required.
+3. Switch to the **Probe Control** tab. Register a probe in the
+   **Probes** card:
+   - **Name**, **Mgmt host / port**, **HTTPS**, **Bearer token**
+     (matches the probe's persisted token — see the bootstrap below).
+   - Click **Register probe**; the row's *Health* column should flip to
      **OK** and surface the probe's hostname + detected `test_iface`.
-4. Tell the master which vNIC on the probe VM is the "test" NIC:
-   - Paste the probe VM's `extId` (visible in PC) into **Probe VM UUID**.
-   - Click **Fetch probe NICs**. The dropdown populates with each vNIC
-     and its current subnet.
-   - Pick the one wired to the test iface inside the guest, click
-     **Save selection**. The probe row now shows the saved VM UUID + NIC
-     ext id.
-5. Enter the per-VLAN test rows into the textarea, one per line:
-
-   ```
-   # name, vlan, test_ip, prefix, gateway, external_ip
-   mgmt_test,100,10.0.100.50,24,10.0.100.1,8.8.8.8
-   storage_test,200,10.0.200.50,24,10.0.200.1,8.8.8.8
-   dmz_test,300,10.0.300.50,24,10.0.300.1,1.1.1.1
-   ```
-
-   - VLAN must already exist as a subnet on the **target cluster** you
-     picked in card 2 (the master looks it up by `networkId`). Run
-     `Create networks` first if you're testing freshly-built VLANs.
-   - `external_ip` is optional; leave blank to ping only the gateway.
-6. Click **Run probe tests**. The log pane streams one block per VLAN:
+4. In the **Probe agent** card (auto-filled when you pick a probe):
+   - **Bearer token**: click **Reveal** to see the stored token, or
+     **Rotate** to have the probe generate a fresh one (the new value
+     is automatically saved on the master and the old token is
+     invalidated immediately on the probe).
+   - **Management iface / Test iface**: change either, click **Save iface
+     roles** — values are persisted on the probe in
+     `~/.np4m-probe.json` so they survive restarts of the agent.
+   - **Probe VM UUID** + **Fetch probe NICs** -> **Test vNIC** ->
+     **Save selection** wires the probe to the AHV VM whose NIC the
+     master will swap per VLAN.
+5. In the **VLANs to test** card, build the test plan. There are three
+   ways to add rows (you can mix them):
+   - **Load subnets from cluster** lists every subnet on the target
+     cluster; tick the ones you want and click **Add selected**. The
+     row is pre-filled with the subnet's name, VLAN, prefix and gateway
+     parsed from PC; you just fill in **Test IP** (and optionally
+     **External IP**).
+   - **Import CSV…** accepts a header-optional file with the columns
+     `name,vlan,test_ip,prefix,gateway,external_ip` (`external_ip`
+     can be blank or missing).
+   - **Add blank row** for ad-hoc entries.
+6. Click **Run probe tests**. Both the shared **Log** card and the
+   **Probe agent log** card (which tails `/probe/logs` over the
+   management NIC) stream the run:
 
    ```
    [10:00:01] Probe-test run: 3 VLAN(s) via probe 'probe-01'.
@@ -940,8 +944,16 @@ Keybindings: `m` to switch mode, `r` to refresh, `q` to quit.
 | POST   | `/api/probes/delete`                | master  | Remove a probe                                     |
 | POST   | `/api/probes/health`                | master  | Force a single-probe health re-check               |
 | POST   | `/api/probes/vm-nics`               | master  | List a probe VM's vNICs via PC v4 (for the picker) |
+| POST   | `/api/probes/token-reveal`          | master  | Return the bearer token the master has stored      |
+| POST   | `/api/probes/proxy-config`          | master  | Proxy GET `/probe/config` (returns mgmt/test iface)|
+| POST   | `/api/probes/proxy-config-set`      | master  | Proxy POST `/probe/config` (persist mgmt/test iface)|
+| POST   | `/api/probes/proxy-token-rotate`    | master  | Have the probe issue a new token; replace stored one|
+| POST   | `/api/probes/proxy-logs`            | master  | Proxy GET `/probe/logs` for the in-UI log panel    |
 | POST   | `/api/probe-tests/run`              | master  | Stream NDJSON: swap subnet + configure + ping      |
 | GET    | `/probe/health`                     | probe   | Unauthenticated discovery                          |
+| GET    | `/probe/config`                     | probe   | Current mgmt/test iface + whether a token is set   |
+| POST   | `/probe/config`                     | probe   | `{mgmt_iface?, test_iface?}` persisted in JSON     |
+| POST   | `/probe/token/rotate`               | probe   | Generate + persist a new bearer token; returns it  |
 | POST   | `/probe/configure`                  | probe   | `{iface, ip, prefix, gateway}` -> apply via nmcli/ip |
 | POST   | `/probe/run-test`                   | probe   | `{gateway, external_ip, count, timeout_s}` -> ping |
 | GET    | `/probe/logs`                       | probe   | Tail the probe's recent activity                   |
