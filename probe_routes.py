@@ -60,6 +60,14 @@ def _expected_token() -> str:
     return (probe_config.get_token() or "").strip()
 
 
+def _tok_fp(t: str) -> str:
+    """Short fingerprint of a bearer token for log messages — first 6 hex
+    chars and the length, without leaking the secret."""
+    if not t:
+        return "(empty)"
+    return f"{t[:6]}...({len(t)})"
+
+
 def _check_auth() -> tuple[bool, str | None]:
     expected = _expected_token()
     if not expected:
@@ -73,6 +81,8 @@ def _check_auth() -> tuple[bool, str | None]:
     return True, None
 
 
+
+
 @probe_bp.before_request
 def _probe_auth_gate() -> Any:
     # /health is intentionally open so the master can discover + register
@@ -81,6 +91,20 @@ def _probe_auth_gate() -> Any:
         return None
     ok, err = _check_auth()
     if not ok:
+        # Log every failed attempt with a non-leaky fingerprint of both
+        # tokens. This is the only diagnostic that can pin down "master
+        # thinks it has token X but probe rejects" — both sides print
+        # the same prefix when they match.
+        hdr = request.headers.get("Authorization", "")
+        presented = ""
+        if hdr.lower().startswith("bearer "):
+            presented = hdr.split(" ", 1)[1].strip()
+        _record(
+            "warn",
+            f"auth-fail {request.method} {request.path}: "
+            f"presented={_tok_fp(presented)} expected={_tok_fp(_expected_token())} "
+            f"from={request.remote_addr}",
+        )
         return jsonify(error=err or "unauthorized"), 401
     g.probe_authed = True
     return None

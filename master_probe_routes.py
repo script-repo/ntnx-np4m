@@ -65,6 +65,14 @@ def _probe_base_url(p: dict[str, Any]) -> str:
     return f"{scheme}://{p['mgmt_host']}:{int(p['mgmt_port'])}"
 
 
+def _tok_fp(t: str) -> str:
+    """Match probe_routes._tok_fp so master + probe logs use the same
+    fingerprint format and can be compared by eye."""
+    if not t:
+        return "(empty)"
+    return f"{t[:6]}...({len(t)})"
+
+
 def _probe_request(
     p: dict[str, Any],
     method: str,
@@ -636,7 +644,16 @@ def api_probe_tests_run() -> Any:
             except ValueError:
                 conf = {"ok": False, "error": f"non-JSON: {r.text[:200]}"}
             if not conf.get("ok"):
-                yield emit("error", f"  probe /configure rejected: {conf.get('error')}")
+                # Include the HTTP status and a token fingerprint so a 401
+                # is immediately distinguishable from an in-guest nmcli
+                # failure, and the fingerprint can be matched against the
+                # probe's own auth-fail log line.
+                yield emit(
+                    "error",
+                    "  probe /configure rejected: "
+                    f"status={r.status_code} error={conf.get('error')} "
+                    f"sent_token={_tok_fp(probe.get('token') or '')}",
+                )
                 fail_count += 1
                 continue
             yield emit("ok", f"    backend={conf.get('backend')}")
