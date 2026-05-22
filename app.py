@@ -55,8 +55,19 @@ from flask import (
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+# When this file is launched via `python app.py`, Python loads it as the
+# `__main__` module. A sibling module (master_probe_routes) does `import
+# app as _app` to reach helpers defined here; that import doesn't find an
+# `app` entry in sys.modules and re-executes this file under the new name,
+# producing two parallel half-initialized copies and a "circular import"
+# AttributeError when the second copy reaches the blueprint registration.
+# Aliasing __main__ -> "app" up-front means the sibling import gets the
+# cached, in-flight module and the registration completes cleanly.
+if __name__ == "__main__" and "app" not in sys.modules:
+    sys.modules["app"] = sys.modules[__name__]
+
 __version__ = "0.2.0"
-BUILD = 16   # bump on every commit
+BUILD = 17   # bump on every commit
 
 app = Flask(__name__)
 
