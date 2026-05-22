@@ -321,6 +321,18 @@
     .summary-line strong { color: var(--text); }
     .summary-line .err-text { color: var(--err); }
 
+    .banner {
+      padding: 8px 10px;
+      border-radius: 6px;
+      font-size: 13px;
+      line-height: 1.45;
+      border: 1px solid transparent;
+    }
+    .banner.ok   { background: #ecf7ee; border-color: #c4e3cc; color: #1d6b35; }
+    .banner.err  { background: #fdecec; border-color: #f1c1c1; color: #8a1c1c; }
+    .banner.warn { background: #fff5e6; border-color: #f1d6a8; color: #7a4400; }
+    .banner code { background: rgba(0,0,0,0.06); padding: 1px 4px; border-radius: 3px; }
+
     .actions {
       display: flex;
       align-items: center;
@@ -1061,6 +1073,8 @@ network_VLAN_1003 1003"></textarea>
           </div>
         </div>
       </div>
+
+      <div id="probe-token-sync" class="banner" style="margin-top:8px; display:none;"></div>
 
       <div class="row" style="margin-top:10px;">
         <div class="field" style="flex: 1 1 180px;">
@@ -3121,17 +3135,68 @@ network_VLAN_1003 1003"></textarea>
       $("btn-probe-cfg-refresh").disabled = !hasProbe;
       $("btn-probe-load-subnets").disabled = !state.token || !$("cluster-select").value;
       const tokenEl = $("probe-token-display");
+      const syncEl = $("probe-token-sync");
       if (!hasProbe) {
         tokenEl.textContent = "\u2014";
         $("probe-cfg-mgmt-iface").value = "";
         $("probe-cfg-test-iface").value = "";
         setStatus("probe-agent-status", null, "Pick a probe");
+        if (syncEl) syncEl.style.display = "none";
         return;
       }
       tokenEl.textContent = probeState.tokenVisible
         ? (probeState._cachedToken || "(empty)")
         : "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022 (hidden)";
       setStatus("probe-agent-status", null, p.name || "probe");
+      renderTokenSyncBanner(p);
+    }
+
+    // Compare the fingerprint of the token the master has stored for this
+    // probe against the fingerprint of the token the probe says it
+    // expects. Mismatch means a /probe/configure call will 401, and the
+    // only fix is to copy the token across (Set... from master, or
+    // Rotate which does it via the master so both stay in step).
+    function renderTokenSyncBanner(p) {
+      const el = $("probe-token-sync");
+      if (!el) return;
+      const stored = p && p.stored_token_fp;        // from /api/probes
+      const expected = p && p.health && p.health.expected_token_fp;  // from /probe/health
+      // Probe is unreachable — skip the banner; the row itself shows that.
+      if (!p || !p.health || p.health.reachable === false) {
+        el.style.display = "none";
+        return;
+      }
+      // Open-mode probe (no auth required) — nothing to compare.
+      if (p.health && p.health.auth_required === false) {
+        el.style.display = "block";
+        el.className = "banner ok";
+        el.innerHTML = "Probe has <b>no bearer token</b> set (open mode). Any token stored on the master will be ignored.";
+        return;
+      }
+      if (!expected || !stored) {
+        // Probe is too old to report a fingerprint, or master has none stored yet.
+        el.style.display = "none";
+        return;
+      }
+      el.style.display = "block";
+      if (stored === expected) {
+        el.className = "banner ok";
+        el.innerHTML = `Token sync: <b>OK</b> &mdash; master and probe agree on <code>${escapeHtml(stored)}</code>.`;
+      } else {
+        el.className = "banner err";
+        el.innerHTML =
+          `Token <b>DESYNC</b> &mdash; master is sending <code>${escapeHtml(stored)}</code> ` +
+          `but probe expects <code>${escapeHtml(expected)}</code>. ` +
+          `Click <b>Set...</b> and paste the token the probe currently has, ` +
+          `or click <b>Rotate</b> to generate a fresh one and update both sides at once.`;
+      }
+    }
+
+    function escapeHtml(s) {
+      return String(s == null ? "" : s)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
     }
 
     async function revealProbeToken() {

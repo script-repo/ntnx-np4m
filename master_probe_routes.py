@@ -26,7 +26,10 @@ from app.py.
 from __future__ import annotations
 
 import json
+import os
+import pathlib
 import secrets
+import sys
 import threading
 import time
 import uuid
@@ -40,14 +43,73 @@ import app as _app  # circular-safe at import time: only attributes used at call
 
 master_probe_bp = Blueprint("master_probe", __name__)
 
-# Probe registry. Lives in process memory like the other SESSIONS dicts
-# in app.py; bouncing the process clears it.
+# Probe registry, persisted to disk so a master restart doesn't force the
+# operator to re-register every probe (and risk typing the wrong bearer
+# token, which used to cause silent token/probe desync).
+#
+# The file is co-located with app.py so sudo/systemd HOME translation
+# can't redirect it somewhere unwritable (same reasoning as
+# probe_config.DEFAULT_PATH on the probe side).
+_REGISTRY_FILE = pathlib.Path(__file__).resolve().parent / ".np4m-master.json"
 PROBES: dict[str, dict[str, Any]] = {}
 _probes_lock = threading.Lock()
+_persist_warned = False
+
+
+def _save_probes_unlocked() -> None:
+    """Atomically write PROBES to disk. Caller MUST hold _probes_lock.
+    Any failure is logged once to stderr; we never raise (a save failure
+    must not break the API call that triggered it)."""
+    global _persist_warned
+    try:
+        _REGISTRY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _REGISTRY_FILE.with_suffix(_REGISTRY_FILE.suffix + ".tmp")
+        tmp.write_text(json.dumps(PROBES, indent=2, sort_keys=True), "utf-8")
+        tmp.replace(_REGISTRY_FILE)
+        try:
+            os.chmod(_REGISTRY_FILE, 0o600)
+        except Exception:
+            pass
+        _persist_warned = False
+    except Exception as exc:
+        if not _persist_warned:
+            print(
+                f"np4m master: failed to persist probe registry {_REGISTRY_FILE!s}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+            _persist_warned = True
+
+
+def _load_probes_from_disk() -> None:
+    """Best-effort load of the probe registry. Called once at module
+    import; missing/corrupt file just leaves PROBES empty."""
+    if not _REGISTRY_FILE.exists():
+        return
+    try:
+        raw = json.loads(_REGISTRY_FILE.read_text("utf-8"))
+    except Exception as exc:
+        print(
+            f"np4m master: probe registry {_REGISTRY_FILE!s} is unreadable ({exc}); starting empty",
+            file=sys.stderr,
+            flush=True,
+        )
+        return
+    if not isinstance(raw, dict):
+        return
+    with _probes_lock:
+        for probe_id, record in raw.items():
+            if isinstance(probe_id, str) and isinstance(record, dict):
+                PROBES[probe_id] = record
+
+
+_load_probes_from_disk()
 
 
 def _redacted_probe(p: dict[str, Any]) -> dict[str, Any]:
-    """Strip the bearer token before exposing a probe to the UI."""
+    """Strip the bearer token before exposing a probe to the UI, but
+    include a non-secret fingerprint so the UI can detect master/probe
+    token desync without ever sending the token to the browser."""
     return {
         "id": p.get("id"),
         "name": p.get("name"),
@@ -57,6 +119,7 @@ def _redacted_probe(p: dict[str, Any]) -> dict[str, Any]:
         "probe_vm_uuid": p.get("probe_vm_uuid"),
         "test_nic_ext_id": p.get("test_nic_ext_id"),
         "created_at": p.get("created_at"),
+        "stored_token_fp": _tok_fp(p.get("token") or ""),
     }
 
 
@@ -134,6 +197,7 @@ def api_probes_register() -> Any:
     }
     with _probes_lock:
         PROBES[probe_id] = record
+        _save_probes_unlocked()
     return jsonify(probe=_redacted_probe(record))
 
 
@@ -154,6 +218,7 @@ def api_probes_update() -> Any:
                     val = val.strip()
                 p[field] = val or None
         snapshot = dict(p)
+        _save_probes_unlocked()
     return jsonify(probe=_redacted_probe(snapshot))
 
 
@@ -163,6 +228,8 @@ def api_probes_delete() -> Any:
     probe_id = (body.get("probe_id") or "").strip()
     with _probes_lock:
         p = PROBES.pop(probe_id, None)
+        if p:
+            _save_probes_unlocked()
     return jsonify(removed=bool(p))
 
 
@@ -301,6 +368,7 @@ def api_probes_proxy_token_rotate() -> Any:
             stored = PROBES.get(probe_id)
             if stored is not None:
                 stored["token"] = new_token
+                _save_probes_unlocked()
     return jsonify(payload)
 
 

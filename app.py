@@ -67,7 +67,7 @@ if __name__ == "__main__" and "app" not in sys.modules:
     sys.modules["app"] = sys.modules[__name__]
 
 __version__ = "0.2.0"
-BUILD = 24   # bump on every commit
+BUILD = 25   # bump on every commit
 
 app = Flask(__name__)
 
@@ -583,15 +583,32 @@ def api_self_update_preflight():
 
 
 def _schedule_master_sigterm(delay: float = 2.0) -> None:
-    """Send SIGTERM to our parent (the gunicorn master) after `delay`s.
-    With Restart=always in the systemd unit, systemd will respawn it with
-    the freshly-pulled code."""
+    """Restart the running python process in place after `delay`s, so a
+    fresh interpreter loads whatever was just `git reset --hard`'d.
+
+    Earlier versions sent SIGTERM to the parent in the hope that systemd
+    (or gunicorn) would respawn the worker. That only works under an
+    actual supervisor; the lab deployment runs under plain
+    ``sudo nohup python app.py`` so the parent is sudo, killing it just
+    leaves the python child running the OLD code while the operator
+    thinks the update applied. ``os.execv`` replaces the current process
+    image, keeps the same PID, and inherits the full env block, so the
+    bearer token, mgmt iface, etc. survive the bounce."""
     def _kick():
         time.sleep(delay)
         try:
-            os.kill(os.getppid(), signal.SIGTERM)
-        except Exception:
-            pass
+            python = sys.executable or "python3"
+            # sys.argv[0] is "app.py" (or absolute); pass the rest through
+            # so --mode probe etc. survives the re-exec.
+            argv = [python, os.path.abspath(sys.argv[0])] + list(sys.argv[1:])
+            os.execv(python, argv)
+        except Exception as exc:
+            print(f"np4m self-update: re-exec failed: {exc}", file=sys.stderr, flush=True)
+            # Fall back to the old behaviour as a last resort.
+            try:
+                os.kill(os.getppid(), signal.SIGTERM)
+            except Exception:
+                pass
     threading.Thread(target=_kick, daemon=True).start()
 
 

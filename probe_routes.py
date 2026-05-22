@@ -142,6 +142,12 @@ def probe_health() -> Any:
         "test_ip": test_ip,
         "interfaces": ifaces,
         "auth_required": bool(_expected_token()),
+        # Non-secret fingerprint of the token the probe currently expects
+        # (first 6 hex chars + length). The master compares this against
+        # the fingerprint of its own stored token to detect desync the
+        # instant /probe/health is polled, rather than waiting for the
+        # next /configure call to 401.
+        "expected_token_fp": _tok_fp(_expected_token()),
     }
     return jsonify(payload)
 
@@ -244,6 +250,7 @@ def probe_config_get() -> Any:
         test_iface=iface.get_test_iface(),
         auth_required=bool(_expected_token()),
         token_set=bool(_expected_token()),
+        token_fp=_tok_fp(_expected_token()),
         config_path=probe_config.config_path(),
     )
 
