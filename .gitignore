@@ -53,3 +53,10 @@ progress.txt
 _*.py
 scratch/
 .work/
+
+# Local persistence files generated at runtime
+.np4m-master.json
+.np4m-probe.json
+
+# Throwaway helper scripts used during ad-hoc remote diagnostics
+.tmp-*
