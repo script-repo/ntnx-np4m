@@ -1001,13 +1001,13 @@ network_VLAN_1003 1003"></textarea>
         </div>
         <div class="field" style="flex: 0 1 100px;">
           <label for="probe-port">Port</label>
-          <input type="number" id="probe-port" value="5050" min="1" max="65535" />
+          <input type="number" id="probe-port" value="8443" min="1" max="65535" />
         </div>
         <div class="field" style="flex: 0 1 90px;">
           <label for="probe-https">HTTPS</label>
           <select id="probe-https">
+            <option value="true" selected>Yes</option>
             <option value="false">No</option>
-            <option value="true">Yes</option>
           </select>
         </div>
         <div class="field" style="flex: 2 1 200px;">
@@ -2750,7 +2750,7 @@ network_VLAN_1003 1003"></textarea>
     async function registerProbe() {
       const name = $("probe-name").value.trim();
       const mgmt_host = $("probe-host").value.trim();
-      const mgmt_port = parseInt($("probe-port").value, 10) || 5050;
+      const mgmt_port = parseInt($("probe-port").value, 10) || 8443;
       const use_https = $("probe-https").value === "true";
       const token = $("probe-token").value.trim();
       if (!mgmt_host) {
