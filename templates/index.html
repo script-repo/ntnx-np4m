@@ -3307,25 +3307,86 @@ network_VLAN_1003 1003"></textarea>
       renderSubnetPicker();
     }
 
+    // RFC 4180-ish CSV parser. Handles:
+    //  - quoted fields ("..."), with embedded commas and newlines
+    //  - escaped quotes inside quoted fields ("" -> ")
+    //  - mixed quoted and unquoted fields in the same row
+    //  - leading UTF-8 BOM
+    //  - both \r\n and \n line endings
+    // Returns rows of string cells. Whitespace OUTSIDE quotes is trimmed
+    // per-cell; whitespace inside quotes is preserved.
+    function parseCsv(text) {
+      const src = String(text || "").replace(/^\uFEFF/, "");
+      const rows = [];
+      let row = [];
+      let cell = "";
+      let inQuotes = false;
+      let i = 0;
+      const n = src.length;
+      const pushCell = () => {
+        if (inQuotes) {
+          row.push(cell);
+        } else {
+          row.push(cell.trim());
+        }
+        cell = "";
+      };
+      const pushRow = () => {
+        pushCell();
+        rows.push(row);
+        row = [];
+      };
+      while (i < n) {
+        const ch = src[i];
+        if (inQuotes) {
+          if (ch === '"') {
+            if (src[i + 1] === '"') { cell += '"'; i += 2; continue; }
+            inQuotes = false; i++; continue;
+          }
+          cell += ch; i++; continue;
+        }
+        if (ch === '"') {
+          // Quote opens a field only if the cell is still empty
+          // (ignoring surrounding whitespace). Otherwise the quote is
+          // treated literally so we don't mangle pathological inputs.
+          if (cell.trim() === "") { inQuotes = true; cell = ""; i++; continue; }
+          cell += ch; i++; continue;
+        }
+        if (ch === ",") { pushCell(); i++; continue; }
+        if (ch === "\r") { i++; continue; }
+        if (ch === "\n") { pushRow(); i++; continue; }
+        cell += ch; i++;
+      }
+      // Flush trailing row only if it has any content.
+      if (cell !== "" || row.length > 0) pushRow();
+      return rows;
+    }
+
     function importProbeCsv(file) {
       const reader = new FileReader();
       reader.onload = () => {
         const txt = String(reader.result || "");
-        const lines = txt.split(/\r?\n/);
+        const rows = parseCsv(txt);
         let added = 0;
+        let skipped = 0;
         const seen = new Set(probeState.rows.map((r) => (r.name || "").toLowerCase()));
-        lines.forEach((raw, lineIdx) => {
-          const line = raw.trim();
-          if (!line || line.startsWith("#")) return;
-          const parts = line.split(",").map((s) => s.trim());
-          // Skip a header row if the second column doesn't parse as an int.
-          if (lineIdx === 0 && parts.length >= 2 && !/^\d+$/.test(parts[1])) {
+        rows.forEach((parts, rowIdx) => {
+          // Skip empty rows + comment lines (single-cell row starting with #).
+          if (!parts.length) return;
+          const allEmpty = parts.every((c) => !c);
+          if (allEmpty) return;
+          if (parts.length === 1 && parts[0].startsWith("#")) return;
+          // Header heuristic: on the first non-empty row, if the second
+          // column doesn't parse as an integer treat it as a header.
+          // (CSVs written by Export CSV match this.)
+          if (rowIdx === 0 && parts.length >= 2 && !/^-?\d+$/.test((parts[1] || "").trim())) {
             return;
           }
-          if (parts.length < 5) return;
+          if (parts.length < 5) { skipped++; return; }
           const [name, vlan, test_ip, prefix, gateway, external_ip] = parts;
           const key = (name || "").toLowerCase();
-          if (!key || seen.has(key)) return;
+          if (!key) { skipped++; return; }
+          if (seen.has(key)) { skipped++; return; }
           seen.add(key);
           probeState.rows.push(_newRow({
             name, vlan, test_ip, prefix,
@@ -3333,7 +3394,9 @@ network_VLAN_1003 1003"></textarea>
           }));
           added++;
         });
-        addLog("info", `CSV imported: ${added} row(s) added.`);
+        const tail = skipped > 0 ? ` (${skipped} skipped)` : "";
+        addLog(added > 0 ? "info" : "warn",
+               `CSV imported: ${added} row(s) added${tail}.`);
         renderProbeRows();
       };
       reader.onerror = () => addLog("error", "CSV read failed.");
