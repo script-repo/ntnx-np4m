@@ -83,11 +83,27 @@ def _check_auth() -> tuple[bool, str | None]:
 
 
 
+# Endpoints that intentionally skip the bearer gate. These are *read-only*
+# diagnostic endpoints that contain no secrets, so we let the probe's own
+# self-service web UI render them without forcing the operator to paste
+# the bearer token into the browser first.
+#
+# /health: original discovery endpoint; the master polls it on register.
+# /config (GET): mgmt/test iface names + auth-required flag + token fp.
+#                Does NOT echo the bearer token; only its 6-char fingerprint.
+# /logs:   bounded ring buffer of operational events (configure/run-test
+#          results, auth failures). No secrets — failed-auth lines log a
+#          6-char fingerprint, not the full presented value.
+_UNAUTHED_PROBE_ENDPOINTS = {
+    "probe.probe_health",
+    "probe.probe_config_get",
+    "probe.probe_logs",
+}
+
+
 @probe_bp.before_request
 def _probe_auth_gate() -> Any:
-    # /health is intentionally open so the master can discover + register
-    # an unauthenticated probe and *then* push a token to it (out of band).
-    if request.endpoint and request.endpoint.endswith(".probe_health"):
+    if request.endpoint in _UNAUTHED_PROBE_ENDPOINTS:
         return None
     ok, err = _check_auth()
     if not ok:

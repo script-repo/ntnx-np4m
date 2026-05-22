@@ -38,6 +38,7 @@
       align-items: center;
       justify-content: space-between;
       gap: 16px;
+      flex-wrap: wrap;
     }
     header h1 { margin: 0; font-size: 17px; font-weight: 600; letter-spacing: 0.2px; }
     header .sub { margin-top: 2px; font-size: 12px; color: var(--muted); }
@@ -57,6 +58,42 @@
       width: 8px; height: 8px; border-radius: 50%;
       background: var(--accent);
     }
+
+    /* Update pill, mirroring index.html exactly so the operator sees
+       the same widget on master and probe and triggers the same /api/self-update flow. */
+    .update-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      border-radius: 999px;
+      border: 1px solid #2a3140;
+      background: #1f2430;
+      color: #9aa3b2;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: default;
+      user-select: none;
+      text-decoration: none;
+    }
+    .update-btn .dot { width: 8px; height: 8px; border-radius: 50%; background: #6b7280; }
+    .update-btn[data-state="loading"]   { opacity: 0.6; }
+    .update-btn[data-state="uptodate"]  { background: #1f2430; color: #9aa3b2; border-color: #2a3140; }
+    .update-btn[data-state="uptodate"] .dot { background: #4b5563; }
+    .update-btn[data-state="available"] {
+      background: #064e3b; color: #d1fae5; border-color: #10b981; cursor: pointer;
+    }
+    .update-btn[data-state="available"]:hover { background: #065f46; color: #ecfdf5; }
+    .update-btn[data-state="available"] .dot { background: #10b981; box-shadow: 0 0 0 3px rgba(16,185,129,0.25); }
+    .update-btn[data-state="updating"]  { background: #1e3a5f; color: #bfdbfe; border-color: #3b82f6; cursor: progress; }
+    .update-btn[data-state="updating"] .dot { background: #3b82f6; animation: np4m-pulse 1.2s ease-in-out infinite; }
+    @keyframes np4m-pulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(59,130,246,0.45); }
+      50%      { box-shadow: 0 0 0 5px rgba(59,130,246,0); }
+    }
+    .update-btn[data-state="error"]     { background: #3a1e1e; color: #fecaca; border-color: #7f1d1d; }
+    .update-btn[data-state="error"] .dot { background: #ef4444; }
+
     button {
       font: inherit;
       font-weight: 600;
@@ -73,10 +110,11 @@
       color: var(--text);
       border: 1px solid var(--border);
     }
+    button:disabled, button.secondary:disabled { opacity: 0.5; cursor: not-allowed; }
     main {
       max-width: 1000px;
       margin: 0 auto;
-      padding: 24px 28px 16px;
+      padding: 24px 28px 32px;
       display: grid;
       gap: 16px;
     }
@@ -87,7 +125,7 @@
       padding: 16px 18px;
     }
     .card h2 {
-      margin: 0 0 8px 0;
+      margin: 0 0 12px 0;
       font-size: 13px;
       font-weight: 600;
       color: var(--muted);
@@ -100,7 +138,10 @@
       gap: 6px 16px;
     }
     .grid div.k { color: var(--muted); }
-    .grid div.v { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; word-break: break-all; }
+    .grid div.v {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      word-break: break-all;
+    }
     .badge {
       display: inline-block;
       padding: 1px 8px;
@@ -108,8 +149,8 @@
       font-size: 11px;
       font-weight: 600;
     }
-    .badge.ok { background: #064e3b; color: #d1fae5; }
-    .badge.bad { background: #3a1e1e; color: #fecaca; }
+    .badge.ok   { background: #064e3b; color: #d1fae5; }
+    .badge.bad  { background: #3a1e1e; color: #fecaca; }
     .badge.warn { background: #4a2e0f; color: #fde68a; }
     .logpane {
       background: #000;
@@ -128,29 +169,34 @@
     .logline.error { color: var(--err); }
     .logline.warn  { color: var(--warn); }
     .logline .ts   { color: var(--muted); margin-right: 8px; }
-    .actions { display: flex; gap: 10px; align-items: center; margin-top: 4px; flex-wrap: wrap; }
-    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; }
-    .field { display: flex; flex-direction: column; flex: 1 1 200px; min-width: 160px; }
-    .field label { font-size: 11.5px; color: var(--muted); font-weight: 600; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.4px; }
-    .field input, .field input[type="text"] {
-      background: #0b0f15; color: var(--text);
-      border: 1px solid var(--border); border-radius: 6px;
-      padding: 7px 10px; font-size: 13px;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    .actions {
+      display: flex; gap: 10px; align-items: center; margin-top: 8px; flex-wrap: wrap;
     }
-    .field input:disabled { opacity: 0.55; cursor: not-allowed; }
-    .banner { padding: 10px 14px; border-radius: 6px; font-size: 12.5px; }
+    .banner { padding: 10px 14px; border-radius: 6px; font-size: 12.5px; line-height: 1.45; }
     .banner.warn { background: #3a2a07; border: 1px solid #92560a; color: #fde68a; }
-    .banner.ok { background: #052e1d; border: 1px solid #0a6e3f; color: #a7f3d0; }
-    .reveal-box {
-      background: #0b0f15; border: 1px solid var(--accent); border-radius: 6px;
-      padding: 10px 12px; margin-top: 8px;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 12.5px; word-break: break-all;
-      display: flex; gap: 10px; align-items: center;
+    .banner.ok   { background: #052e1d; border: 1px solid #0a6e3f; color: #a7f3d0; }
+    .banner.err  { background: #3a1e1e; border: 1px solid #7f1d1d; color: #fecaca; }
+    .banner code { background: rgba(255,255,255,0.06); padding: 1px 4px; border-radius: 3px; }
+    .token-box {
+      display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+      background: #0b0f15;
+      border: 1px solid var(--accent);
+      border-radius: 6px;
+      padding: 10px 12px;
+      margin: 8px 0 4px 0;
     }
-    .reveal-box code { flex: 1 1 auto; color: var(--accent); }
+    .token-box code {
+      flex: 1 1 auto;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px;
+      color: var(--accent);
+      word-break: break-all;
+    }
     .muted { color: var(--muted); font-size: 12px; }
+    table.iface { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+    table.iface th { text-align: left; color: var(--muted); font-weight: 600; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+    table.iface td { padding: 6px 8px; border-bottom: 1px solid var(--border); font-family: ui-monospace, monospace; }
+    table.iface td.role-cell { font-family: inherit; }
   </style>
 </head>
 <body>
@@ -159,329 +205,283 @@
       <h1>NP4M Probe Agent <span style="font-weight:400; color:var(--muted);">v{{ version }} build {{ build }}</span></h1>
       <div class="sub">This node is running as a probe. The master pushes test instructions here over the management NIC.</div>
     </div>
-    <div style="display:flex; gap:8px; align-items:center;">
+    <div style="display:flex; gap:8px; align-items:center; flex-wrap: wrap;">
+      <a id="update-btn" class="update-btn" data-state="loading" title="Checking for updates...">
+        <span class="dot"></span>
+        <span class="label">Checking...</span>
+      </a>
       <span class="pill"><span class="dot"></span><span>Mode: PROBE</span></span>
-      <button class="secondary" id="btn-self-update" title="git pull + pip install + restart this probe agent.">Update + restart</button>
       <button class="secondary" id="btn-to-master">Switch to master</button>
     </div>
   </header>
 
   <main>
+    <!-- ============================ BEARER TOKEN ============================ -->
     <section class="card">
       <h2>Bearer token</h2>
-      <div id="token-banner" class="banner warn" style="margin-bottom:10px;">Loading...</div>
+      {% if auth_required %}
+      <div class="banner ok">
+        This probe requires <b>Authorization: Bearer &lt;token&gt;</b> for every write.
+        Paste the value below into the master's <b>Set...</b> dialog if the master ever
+        reports a token desync, or copy it into <code>NP4M_PROBE_TOKEN</code> on any other
+        master that needs to drive this probe.
+      </div>
+      {% else %}
+      <div class="banner warn">
+        Probe is <b>OPEN</b> &mdash; no bearer token is configured. Any node reachable on
+        the management NIC can drive this probe. Click <b>Generate / rotate</b> below to
+        set one.
+      </div>
+      {% endif %}
 
-      <div class="row">
-        <div class="field">
-          <label for="session-token">Session token (paste current token to unlock writes)</label>
-          <input type="password" id="session-token" autocomplete="off" placeholder="paste here, then click anywhere to apply" />
-        </div>
-        <div class="actions">
-          <button id="btn-token-rotate" disabled>Generate / rotate</button>
-        </div>
+      <div class="token-box">
+        <code id="token-current">{{ current_token if current_token else '(not set)' }}</code>
+        <button class="secondary" id="btn-token-copy" {{ '' if current_token else 'disabled' }}>Copy</button>
+        <button class="secondary" id="btn-token-hide" {{ '' if current_token else 'disabled' }}>Hide</button>
+        <button id="btn-token-rotate">{{ 'Rotate' if auth_required else 'Generate' }}</button>
       </div>
-      <div id="token-reveal" style="display:none;" class="reveal-box">
-        <code id="token-reveal-value"></code>
-        <button class="secondary" id="btn-token-copy">Copy</button>
-        <button class="secondary" id="btn-token-hide">Hide</button>
+      <div class="muted" id="token-meta">
+        The token is stored in <code>~/.np4m-probe.json</code> on this VM (or seeded from
+        <code>NP4M_PROBE_TOKEN</code> at startup if no file exists yet). It survives agent restarts.
       </div>
-      <div class="muted" style="margin-top:6px;" id="token-meta">&mdash;</div>
     </section>
 
-    <section class="card">
-      <h2>Interface roles</h2>
-      <div class="row">
-        <div class="field">
-          <label for="cfg-mgmt-iface">Management iface (do not touch in tests)</label>
-          <input type="text" id="cfg-mgmt-iface" autocomplete="off" placeholder="e.g. eth0" />
-        </div>
-        <div class="field">
-          <label for="cfg-test-iface">Test iface (master will reconfigure this per VLAN)</label>
-          <input type="text" id="cfg-test-iface" autocomplete="off" placeholder="e.g. eth1" />
-        </div>
-        <div class="actions">
-          <button id="btn-cfg-save" disabled>Save</button>
-          <button class="secondary" id="btn-cfg-refresh">Refresh</button>
-        </div>
-      </div>
-      <div class="muted" style="margin-top:6px;" id="cfg-meta">Stored in <code>~/.np4m-probe.json</code> on the probe. Survives agent restart.</div>
-    </section>
-
+    <!-- ============================ HEALTH ============================ -->
     <section class="card">
       <h2>Health</h2>
       <div class="grid" id="health-grid">
-        <div class="k">Loading...</div><div class="v">—</div>
+        <div class="k">Hostname</div>     <div class="v" id="hc-host">{{ hostname }}</div>
+        <div class="k">Mode</div>         <div class="v" id="hc-mode">PROBE</div>
+        <div class="k">Build</div>        <div class="v" id="hc-build">v{{ version }} build {{ build }}</div>
+        <div class="k">Platform</div>     <div class="v" id="hc-platform">{{ platform }}</div>
+        <div class="k">Mgmt iface</div>
+        <div class="v" id="hc-mgmt">
+          {% if mgmt_iface %}{{ mgmt_iface }}{% if mgmt_ip %} ({{ mgmt_ip }}){% endif %}{% else %}(unset){% endif %}
+        </div>
+        <div class="k">Test iface</div>
+        <div class="v" id="hc-test">
+          {% if test_iface %}{{ test_iface }}{% if test_ip %} ({{ test_ip }}){% endif %}{% else %}(unset){% endif %}
+        </div>
+        <div class="k">Auth required</div>
+        <div class="v" id="hc-auth">{{ 'yes (Bearer)' if auth_required else 'no (open mode)' }}</div>
       </div>
       <div class="actions">
         <button id="btn-refresh-health" class="secondary">Refresh</button>
-        <span id="health-meta" style="color:var(--muted); font-size:12px;"></span>
+        <span id="health-meta" class="muted"></span>
       </div>
     </section>
 
+    <!-- ============================ INTERFACES ============================ -->
     <section class="card">
       <h2>Interfaces</h2>
-      <table style="width:100%; border-collapse: collapse; font-size:12.5px;">
+      <table class="iface">
         <thead>
-          <tr style="text-align:left; color:var(--muted);">
-            <th style="padding:6px 8px; border-bottom:1px solid var(--border);">Name</th>
-            <th style="padding:6px 8px; border-bottom:1px solid var(--border);">IPv4</th>
-            <th style="padding:6px 8px; border-bottom:1px solid var(--border);">Role</th>
+          <tr>
+            <th>Name</th>
+            <th>IPv4</th>
+            <th>Role</th>
           </tr>
         </thead>
-        <tbody id="iface-tbody"></tbody>
+        <tbody id="iface-tbody">
+          {% for it in interfaces %}
+          <tr>
+            <td>{{ it.name }}</td>
+            <td>{{ it.ipv4 or '—' }}</td>
+            <td class="role-cell">
+              {% if it.name == mgmt_iface %}
+                <span class="badge ok">MGMT (do-not-touch)</span>
+              {% elif it.name == test_iface %}
+                <span class="badge warn">TEST (master-managed)</span>
+              {% else %}
+                —
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
       </table>
     </section>
 
+    <!-- ============================ RECENT ACTIVITY ============================ -->
     <section class="card">
       <h2>Recent activity</h2>
-      <div class="logpane" id="logpane"></div>
+      <div class="logpane" id="logpane">
+        {% for entry in recent_logs %}<div class="logline {{ entry.level or 'info' }}"><span class="ts">[{{ '%.0f' | format(entry.ts) }}]</span> {{ entry.msg }}</div>{% endfor %}
+      </div>
       <div class="actions">
         <button id="btn-refresh-logs" class="secondary">Refresh logs</button>
-        <span id="logs-meta" style="color:var(--muted); font-size:12px;"></span>
+        <span id="logs-meta" class="muted">{{ recent_logs|length }} entry(ies).</span>
       </div>
     </section>
   </main>
 
   <script>
     const $ = (id) => document.getElementById(id);
-    const LS_TOKEN_KEY = "np4m-probe-session-token";
-    const state = {
-      authRequired: null,    // null = unknown, true/false from health
-      sessionToken: "",      // captured by user paste OR last rotate
-    };
 
     function fmtTs(ts) {
       if (!ts) return "";
       try { return new Date(ts * 1000).toLocaleTimeString(); } catch (_) { return ""; }
     }
 
-    function authHeaders() {
-      const h = { "Content-Type": "application/json" };
-      if (state.sessionToken) h["Authorization"] = "Bearer " + state.sessionToken;
-      return h;
+    function escapeHtml(s) {
+      return String(s == null ? "" : s)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
     }
 
-    function updateAuthGates() {
-      const tokenSet = state.authRequired === true;
-      const banner = $("token-banner");
-      if (state.authRequired === null) {
-        banner.className = "banner warn";
-        banner.textContent = "Loading\u2026";
-      } else if (tokenSet) {
-        banner.className = "banner ok";
-        banner.textContent = "Bearer token is configured. Paste it above to unlock changes from this browser.";
-      } else {
-        banner.className = "banner warn";
-        banner.textContent = "PROBE IS OPEN. No bearer token is configured \u2014 anyone reachable on the mgmt NIC can drive this probe. Click \u201CGenerate / rotate\u201D to set one.";
+    // -------------------------------------------------------------------
+    // Bearer token
+    // -------------------------------------------------------------------
+    // The current token is rendered into the DOM by the Flask template,
+    // so the rotate handler can read it from the same place rather than
+    // forcing the user to maintain a separate "session token" input.
+    const tokenState = {
+      hidden: false,
+      lastValue: ($("token-current").textContent || "").trim(),
+    };
+    if (tokenState.lastValue && tokenState.lastValue !== "(not set)") {
+      // Default-show the value so the operator can copy it without
+      // an extra click (this is the user's stated requirement).
+    } else {
+      tokenState.lastValue = "";
+    }
+
+    function setTokenDisplay(value, opts) {
+      tokenState.lastValue = (value || "").trim();
+      tokenState.hidden = !!(opts && opts.hidden);
+      const el = $("token-current");
+      if (!tokenState.lastValue) {
+        el.textContent = "(not set)";
+        $("btn-token-copy").disabled = true;
+        $("btn-token-hide").disabled = true;
+        $("btn-token-hide").textContent = "Hide";
+        $("btn-token-rotate").textContent = "Generate";
+        return;
       }
-
-      // Writes are always allowed when the probe is open (auth_required=false);
-      // when a token is set, the session-token input must contain something.
-      const canWrite = (state.authRequired === false) || !!state.sessionToken;
-      $("btn-cfg-save").disabled = !canWrite;
-      $("btn-token-rotate").disabled = !canWrite;
-      $("btn-token-rotate").textContent = tokenSet ? "Rotate" : "Generate";
+      $("btn-token-copy").disabled = false;
+      $("btn-token-hide").disabled = false;
+      if (tokenState.hidden) {
+        el.textContent = "\u2022".repeat(Math.min(tokenState.lastValue.length, 32)) +
+                         " (hidden, click Show)";
+        $("btn-token-hide").textContent = "Show";
+      } else {
+        el.textContent = tokenState.lastValue;
+        $("btn-token-hide").textContent = "Hide";
+      }
+      $("btn-token-rotate").textContent = "Rotate";
     }
 
-    function setSessionToken(t, opts) {
-      state.sessionToken = (t || "").trim();
-      const sti = $("session-token");
-      if (opts && opts.fill) sti.value = state.sessionToken;
-      // Persist per-browser so a page refresh doesn't lock us out of
-      // our own probe (the agent has no UI to recover from that).
+    async function copyToken() {
+      const v = tokenState.lastValue;
+      if (!v) return;
       try {
-        if (state.sessionToken) localStorage.setItem(LS_TOKEN_KEY, state.sessionToken);
-        else localStorage.removeItem(LS_TOKEN_KEY);
-      } catch (_) {}
-      updateAuthGates();
-    }
-
-    async function runSelfUpdate() {
-      if (!confirm("Pull the latest NP4M code on this probe, install deps, and restart the agent? The /probe/* endpoints will be unavailable for ~5s while it bounces.")) return;
-      const btn = $("btn-self-update");
-      btn.disabled = true;
-      $("logpane").innerHTML = "";
-      try {
-        const r = await fetch("/api/self-update", { method: "POST" });
-        if (!r.ok) {
-          const txt = await r.text();
-          alert("Self-update rejected: HTTP " + r.status + " " + txt.slice(0, 200));
-          return;
-        }
-        const reader = r.body.getReader();
-        const decoder = new TextDecoder();
-        let buf = "";
-        const pane = $("logpane");
-        const append = (level, msg) => {
-          const line = document.createElement("div");
-          line.className = "logline " + (level || "info");
-          line.textContent = msg;
-          pane.appendChild(line);
-          pane.scrollTop = pane.scrollHeight;
-        };
-        while (true) {
-          const ck = await reader.read();
-          if (ck.done) break;
-          buf += decoder.decode(ck.value, { stream: true });
-          let idx;
-          while ((idx = buf.indexOf("\n")) >= 0) {
-            const line = buf.slice(0, idx); buf = buf.slice(idx + 1);
-            if (!line.trim()) continue;
-            try {
-              const evt = JSON.parse(line);
-              append(evt.level, evt.msg || "");
-            } catch (_) {}
-          }
-        }
-        // Give the agent ~5s to respawn before reloading.
-        setTimeout(() => window.location.reload(), 5000);
-      } catch (e) {
-        alert("Self-update failed: " + e.message);
-      } finally {
-        btn.disabled = false;
+        await navigator.clipboard.writeText(v);
+        $("token-meta").textContent =
+          "Token copied to clipboard. Paste into the master's Set... dialog if needed.";
+      } catch (_) {
+        // Fallback: select the on-screen value so the user can Ctrl-C.
+        const r = document.createRange();
+        r.selectNodeContents($("token-current"));
+        window.getSelection().removeAllRanges();
+        window.getSelection().addRange(r);
+        $("token-meta").textContent = "Couldn't auto-copy; the value is selected for Ctrl-C.";
       }
     }
 
     async function rotateToken() {
-      const isRotate = state.authRequired === true;
-      const verb = isRotate ? "Rotate" : "Generate";
-      const confirmMsg = isRotate
-        ? "Rotate the bearer token? The current token will stop working immediately, and any master that has it stored must be updated."
-        : "Generate a bearer token? The probe is currently OPEN; this will require Bearer auth for all writes afterwards.";
-      if (!confirm(confirmMsg)) return;
+      const wasOpen = !tokenState.lastValue;
+      const verb = wasOpen ? "Generate" : "Rotate";
+      const msg = wasOpen
+        ? "Generate a bearer token? The probe is currently OPEN; afterwards every master that drives it must send Authorization: Bearer <token>."
+        : "Rotate the bearer token? The current token will stop working immediately. Any master that has it stored will need to be updated via its Set... dialog.";
+      if (!confirm(msg)) return;
       $("btn-token-rotate").disabled = true;
+      const headers = { "Content-Type": "application/json" };
+      // /probe/token/rotate is auth-gated; in open mode any token works
+      // because the auth gate is short-circuited when _expected_token is empty.
+      if (tokenState.lastValue) {
+        headers["Authorization"] = "Bearer " + tokenState.lastValue;
+      }
       try {
-        const r = await fetch("/probe/token/rotate", { method: "POST", headers: authHeaders(), body: "{}" });
+        const r = await fetch("/probe/token/rotate", { method: "POST", headers, body: "{}" });
         const j = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(j.error || ("HTTP " + r.status));
-        const t = j.token || "";
+        const t = (j.token || "").trim();
         if (!t) throw new Error("probe returned no token");
-        setSessionToken(t, { fill: true });
-        $("token-reveal-value").textContent = t;
-        $("token-reveal").style.display = "";
-        $("token-meta").textContent = `${verb} succeeded ${new Date().toLocaleTimeString()}. Copy the token now \u2014 it is not retrievable later. Don\u2019t forget to update the master\u2019s registration.`;
-        // Reload health so auth_required flips to true on the UI.
-        await loadHealth();
+        setTokenDisplay(t, { hidden: false });
+        $("token-meta").textContent =
+          `${verb} succeeded ${new Date().toLocaleTimeString()}. ` +
+          "The probe will now reject the previous token. " +
+          "Copy this value into the master's Set... dialog so the master can talk to this probe again.";
+        // Reload health so auth_required flips to true (and any callers
+        // see the new fingerprint right away).
+        await refreshHealth();
       } catch (e) {
         $("token-meta").textContent = `${verb} failed: ${e.message}`;
-        updateAuthGates();
-      }
-    }
-
-    async function loadConfig() {
-      const meta = $("cfg-meta");
-      try {
-        const r = await fetch("/probe/config", { headers: authHeaders() });
-        if (r.status === 401) {
-          meta.textContent = "Paste the current bearer token above to read this probe\u2019s persisted config.";
-          $("cfg-mgmt-iface").disabled = true;
-          $("cfg-test-iface").disabled = true;
-          return;
-        }
-        if (!r.ok) throw new Error("HTTP " + r.status);
-        const j = await r.json();
-        $("cfg-mgmt-iface").value = j.mgmt_iface || "";
-        $("cfg-test-iface").value = j.test_iface || "";
-        $("cfg-mgmt-iface").disabled = false;
-        $("cfg-test-iface").disabled = false;
-        meta.innerHTML = `Persisted in <code>${j.config_path || "~/.np4m-probe.json"}</code>. Survives agent restart.`;
-      } catch (e) {
-        meta.textContent = "Config read failed: " + e.message;
-      }
-    }
-
-    async function saveConfig() {
-      const mgmt = $("cfg-mgmt-iface").value.trim();
-      const test = $("cfg-test-iface").value.trim();
-      if (mgmt && test && mgmt === test) {
-        $("cfg-meta").textContent = "mgmt iface and test iface must differ.";
-        return;
-      }
-      $("btn-cfg-save").disabled = true;
-      try {
-        const r = await fetch("/probe/config", {
-          method: "POST",
-          headers: authHeaders(),
-          body: JSON.stringify({ mgmt_iface: mgmt, test_iface: test }),
-        });
-        const j = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(j.error || ("HTTP " + r.status));
-        $("cfg-meta").innerHTML = `Saved ${new Date().toLocaleTimeString()}: mgmt=<code>${j.mgmt_iface || "(unset)"}</code> test=<code>${j.test_iface || "(unset)"}</code>.`;
-        await loadHealth();
-      } catch (e) {
-        $("cfg-meta").textContent = "Save failed: " + e.message;
       } finally {
-        updateAuthGates();
+        $("btn-token-rotate").disabled = false;
       }
     }
 
-    async function loadHealth() {
-      const grid = $("health-grid");
+    // -------------------------------------------------------------------
+    // Health + interfaces refresh (uses unauthenticated /probe/health)
+    // -------------------------------------------------------------------
+    async function refreshHealth() {
       const meta = $("health-meta");
-      const ifaceTbody = $("iface-tbody");
       try {
-        const r = await fetch("/probe/health");
+        const r = await fetch("/probe/health", { cache: "no-store" });
         if (!r.ok) throw new Error("HTTP " + r.status);
         const j = await r.json();
-        const rows = [
-          ["Hostname", j.hostname || "?"],
-          ["Mode", (j.mode || "?").toUpperCase()],
-          ["Build", `v${j.version} build ${j.build}`],
-          ["Platform", j.platform || "?"],
-          ["Mgmt iface", j.mgmt_iface ? `${j.mgmt_iface}${j.mgmt_ip ? " ("+j.mgmt_ip+")" : ""}` : "(unset)"],
-          ["Test iface", j.test_iface ? `${j.test_iface}${j.test_ip ? " ("+j.test_ip+")" : ""}` : "(unset)"],
-          ["Auth required", j.auth_required ? "yes (Bearer)" : "no (set NP4M_PROBE_TOKEN!)"],
-        ];
-        grid.innerHTML = "";
-        for (const [k, v] of rows) {
-          const dk = document.createElement("div"); dk.className = "k"; dk.textContent = k;
-          const dv = document.createElement("div"); dv.className = "v"; dv.textContent = v;
-          grid.appendChild(dk); grid.appendChild(dv);
-        }
-        ifaceTbody.innerHTML = "";
+        $("hc-host").textContent     = j.hostname || "?";
+        $("hc-mode").textContent     = (j.mode || "?").toUpperCase();
+        $("hc-build").textContent    = `v${j.version} build ${j.build}`;
+        $("hc-platform").textContent = j.platform || "?";
+        $("hc-mgmt").textContent = j.mgmt_iface
+          ? `${j.mgmt_iface}${j.mgmt_ip ? " (" + j.mgmt_ip + ")" : ""}`
+          : "(unset)";
+        $("hc-test").textContent = j.test_iface
+          ? `${j.test_iface}${j.test_ip ? " (" + j.test_ip + ")" : ""}`
+          : "(unset)";
+        $("hc-auth").textContent = j.auth_required ? "yes (Bearer)" : "no (open mode)";
+
+        const tbody = $("iface-tbody");
+        tbody.innerHTML = "";
         const mgmt = j.mgmt_iface;
         const test = j.test_iface;
         (j.interfaces || []).forEach((it) => {
           const tr = document.createElement("tr");
-          const tdName = document.createElement("td");
-          tdName.style.padding = "6px 8px";
-          tdName.style.borderBottom = "1px solid var(--border)";
-          tdName.textContent = it.name || "?";
+          const tdN = document.createElement("td");
+          tdN.textContent = it.name || "?";
           const tdIp = document.createElement("td");
-          tdIp.style.padding = "6px 8px";
-          tdIp.style.borderBottom = "1px solid var(--border)";
-          tdIp.style.fontFamily = "ui-monospace, monospace";
           tdIp.textContent = it.ipv4 || "—";
-          const tdRole = document.createElement("td");
-          tdRole.style.padding = "6px 8px";
-          tdRole.style.borderBottom = "1px solid var(--border)";
+          const tdR = document.createElement("td");
+          tdR.className = "role-cell";
           if (it.name === mgmt) {
-            const b = document.createElement("span");
-            b.className = "badge ok"; b.textContent = "MGMT (do-not-touch)";
-            tdRole.appendChild(b);
+            tdR.innerHTML = '<span class="badge ok">MGMT (do-not-touch)</span>';
           } else if (it.name === test) {
-            const b = document.createElement("span");
-            b.className = "badge warn"; b.textContent = "TEST (master-managed)";
-            tdRole.appendChild(b);
+            tdR.innerHTML = '<span class="badge warn">TEST (master-managed)</span>';
           } else {
-            tdRole.textContent = "—";
+            tdR.textContent = "—";
           }
-          tr.appendChild(tdName); tr.appendChild(tdIp); tr.appendChild(tdRole);
-          ifaceTbody.appendChild(tr);
+          tr.appendChild(tdN); tr.appendChild(tdIp); tr.appendChild(tdR);
+          tbody.appendChild(tr);
         });
+
         meta.textContent = `Refreshed ${new Date().toLocaleTimeString()}.`;
-        state.authRequired = !!j.auth_required;
-        updateAuthGates();
       } catch (e) {
-        meta.textContent = "Health failed: " + e.message;
+        meta.textContent = "Health refresh failed: " + e.message;
       }
     }
 
-    async function loadLogs() {
-      const pane = $("logpane");
+    // -------------------------------------------------------------------
+    // Recent activity (uses unauthenticated /probe/logs)
+    // -------------------------------------------------------------------
+    async function refreshLogs() {
       const meta = $("logs-meta");
+      const pane = $("logpane");
       try {
-        const r = await fetch("/probe/logs?limit=200");
+        const r = await fetch("/probe/logs?limit=200", { cache: "no-store" });
         if (!r.ok) throw new Error("HTTP " + r.status);
         const j = await r.json();
         pane.innerHTML = "";
@@ -496,12 +496,15 @@
           pane.appendChild(line);
         });
         pane.scrollTop = pane.scrollHeight;
-        meta.textContent = `${(j.logs || []).length} entry(ies).`;
+        meta.textContent = `${(j.logs || []).length} entry(ies). Refreshed ${new Date().toLocaleTimeString()}.`;
       } catch (e) {
         meta.textContent = "Logs failed: " + e.message;
       }
     }
 
+    // -------------------------------------------------------------------
+    // Switch to master
+    // -------------------------------------------------------------------
     async function switchToMaster() {
       if (!confirm("Switch this node to MASTER mode? The probe endpoints will stop serving until you flip back.")) return;
       try {
@@ -517,46 +520,222 @@
       }
     }
 
+    // -------------------------------------------------------------------
+    // Update pill (mirrors templates/index.html — same /api/check-update
+    // and /api/self-update flow, same restart-and-reload behaviour).
+    // -------------------------------------------------------------------
+    function logSystem(level, msg) {
+      // Reuse the activity logpane to surface update progress, so the
+      // operator gets the same streaming output the master shows.
+      const pane = $("logpane");
+      const line = document.createElement("div");
+      line.className = "logline " + (level || "info");
+      const ts = document.createElement("span"); ts.className = "ts";
+      ts.textContent = "[" + new Date().toLocaleTimeString() + "]";
+      const txt = document.createElement("span");
+      txt.textContent = " " + msg;
+      line.appendChild(ts); line.appendChild(txt);
+      pane.appendChild(line);
+      pane.scrollTop = pane.scrollHeight;
+    }
+
+    async function setupUpdateButton() {
+      const btn = $("update-btn");
+      if (!btn) return;
+      const labelEl = btn.querySelector(".label");
+      const ui = {
+        localBuild: null,
+        remoteBuild: null,
+        repoUrl: "https://github.com/script-repo/ntnx-np4m",
+        updating: false,
+      };
+
+      const setState = (state, label, title, href) => {
+        btn.dataset.state = state;
+        if (labelEl) labelEl.textContent = label;
+        btn.title = title || "";
+        if (href) {
+          btn.setAttribute("href", href);
+          btn.setAttribute("target", "_blank");
+          btn.setAttribute("rel", "noopener");
+        } else {
+          btn.removeAttribute("href");
+          btn.removeAttribute("target");
+          btn.removeAttribute("rel");
+        }
+      };
+
+      async function check(force) {
+        try {
+          const url = force ? "/api/check-update?force=1" : "/api/check-update";
+          const r = await fetch(url, { headers: { Accept: "application/json" } });
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          const j = await r.json();
+          ui.localBuild = j.local ?? null;
+          ui.remoteBuild = j.remote ?? null;
+          if (j.repo_url) ui.repoUrl = j.repo_url;
+          if (j.error) {
+            setState("error", "Update check failed", j.error, ui.repoUrl);
+            return;
+          }
+          if (j.update_available && j.remote != null) {
+            setState("available", `Update available (build ${j.remote})`,
+              `Local build ${j.local}, upstream build ${j.remote}. Click to install in place.`, null);
+          } else if (j.remote != null) {
+            setState("uptodate", `Up to date (build ${j.local})`,
+              `Local build ${j.local} matches upstream.`, null);
+          } else {
+            setState("error", "Update check unavailable",
+              "Couldn't parse upstream build number.", ui.repoUrl);
+          }
+        } catch (e) {
+          setState("error", "Update check failed", String(e), ui.repoUrl);
+        }
+      }
+
+      async function waitForRestart() {
+        const startBuild = ui.localBuild;
+        const deadline = Date.now() + 60_000;
+        let everSawDown = false;
+        while (Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 1500));
+          try {
+            const r = await fetch("/api/version", {
+              cache: "no-store",
+              headers: { Accept: "application/json" },
+            });
+            if (!r.ok) { everSawDown = true; continue; }
+            const j = await r.json();
+            if (everSawDown && j && j.build != null && j.build !== startBuild) {
+              logSystem("ok", `Service back online at build ${j.build}. Reloading...`);
+              setTimeout(() => window.location.reload(), 600);
+              return;
+            }
+            if (j && j.build != null && startBuild != null && j.build !== startBuild) {
+              logSystem("ok", `Service updated to build ${j.build}. Reloading...`);
+              setTimeout(() => window.location.reload(), 600);
+              return;
+            }
+          } catch (_) {
+            everSawDown = true;
+          }
+        }
+        logSystem("warn", "Timed out waiting for service to come back. Try a hard refresh.");
+        setState("error", "Restart timeout",
+          "Service didn't come back within 60s. Try reloading the page.", ui.repoUrl);
+      }
+
+      async function doSelfUpdate() {
+        if (ui.updating) return;
+        ui.updating = true;
+        const prevState = btn.dataset.state;
+        const prevLabel = labelEl ? labelEl.textContent : "";
+        setState("updating", "Updating...", "Pulling new code and restarting the service.", null);
+
+        let resp;
+        try {
+          resp = await fetch("/api/self-update", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+          });
+        } catch (e) {
+          logSystem("error", `Update request failed: ${e.message}`);
+          ui.updating = false;
+          setState(prevState || "error", prevLabel || "Update failed",
+            "Could not reach the server.", ui.repoUrl);
+          return;
+        }
+        if (!resp.ok || !resp.body) {
+          logSystem("error", `Update endpoint returned HTTP ${resp.status}.`);
+          ui.updating = false;
+          setState("error", "Update failed",
+            `Server returned HTTP ${resp.status}.`, ui.repoUrl);
+          return;
+        }
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = "";
+        let restarting = false;
+        let preflightFailed = null;
+        let aborted = false;
+        while (true) {
+          let chunk;
+          try { chunk = await reader.read(); }
+          catch (e) {
+            if (restarting) break;
+            logSystem("error", `Update stream read error: ${e.message}`);
+            break;
+          }
+          if (chunk.done) break;
+          buf += decoder.decode(chunk.value, { stream: true });
+          let idx;
+          while ((idx = buf.indexOf("\n")) >= 0) {
+            const line = buf.slice(0, idx); buf = buf.slice(idx + 1);
+            if (!line.trim()) continue;
+            let evt;
+            try { evt = JSON.parse(line); } catch (_) { continue; }
+            logSystem(evt.level || "info", evt.msg || "");
+            if (evt.event === "preflight_failed") preflightFailed = evt;
+            else if (evt.event === "restarting") restarting = true;
+            else if (evt.event === "aborted") aborted = true;
+          }
+        }
+        if (preflightFailed) {
+          ui.updating = false;
+          setState("available", `Update available (build ${ui.remoteBuild ?? "?"})`,
+            "Auto-update unavailable on this deploy; opens the repo instead.",
+            preflightFailed.repo_url || ui.repoUrl);
+          window.open(preflightFailed.repo_url || ui.repoUrl, "_blank", "noopener");
+          return;
+        }
+        if (aborted) {
+          ui.updating = false;
+          setState("error", "Update aborted", "See the log for the failing step.", ui.repoUrl);
+          return;
+        }
+        if (restarting) {
+          logSystem("system", "Waiting for the service to come back...");
+          await waitForRestart();
+          ui.updating = false;
+          return;
+        }
+        ui.updating = false;
+        setState("error", "Update incomplete",
+          "Server stopped streaming before restart.", ui.repoUrl);
+      }
+
+      btn.addEventListener("click", (e) => {
+        const st = btn.dataset.state;
+        if (st === "available") { e.preventDefault(); doSelfUpdate(); }
+        else if (st === "updating") { e.preventDefault(); }
+      });
+
+      setState("loading", "Checking...", "Checking for updates...", null);
+      check(false);
+      setInterval(() => { if (!ui.updating) check(false); }, 5 * 60 * 1000);
+    }
+
+    // -------------------------------------------------------------------
+    // Wire up
+    // -------------------------------------------------------------------
     document.addEventListener("DOMContentLoaded", () => {
-      $("btn-refresh-health").addEventListener("click", loadHealth);
-      $("btn-refresh-logs").addEventListener("click", loadLogs);
+      setTokenDisplay(tokenState.lastValue, { hidden: false });
+      $("btn-token-copy").addEventListener("click", copyToken);
+      $("btn-token-hide").addEventListener("click", () => {
+        setTokenDisplay(tokenState.lastValue, { hidden: !tokenState.hidden });
+      });
+      $("btn-token-rotate").addEventListener("click", rotateToken);
+      $("btn-refresh-health").addEventListener("click", refreshHealth);
+      $("btn-refresh-logs").addEventListener("click", refreshLogs);
       $("btn-to-master").addEventListener("click", switchToMaster);
 
-      $("btn-self-update").addEventListener("click", runSelfUpdate);
-      $("btn-cfg-save").addEventListener("click", saveConfig);
-      $("btn-cfg-refresh").addEventListener("click", loadConfig);
-      $("btn-token-rotate").addEventListener("click", rotateToken);
+      setupUpdateButton();
 
-      // Restore a previously-pasted token for this browser so a refresh
-      // doesn't lock the operator out of their own probe.
-      try {
-        const saved = localStorage.getItem(LS_TOKEN_KEY) || "";
-        if (saved) setSessionToken(saved, { fill: true });
-      } catch (_) {}
-      $("btn-token-copy").addEventListener("click", async () => {
-        const v = $("token-reveal-value").textContent || "";
-        try {
-          await navigator.clipboard.writeText(v);
-          $("token-meta").textContent = "Token copied to clipboard.";
-        } catch (_) {
-          $("token-meta").textContent = "Copy failed \u2014 select the value manually.";
-        }
-      });
-      $("btn-token-hide").addEventListener("click", () => {
-        $("token-reveal").style.display = "none";
-      });
-      $("session-token").addEventListener("input", (e) => {
-        setSessionToken(e.target.value, { fill: false });
-      });
-      $("session-token").addEventListener("change", (e) => {
-        setSessionToken(e.target.value, { fill: false });
-        loadConfig();
-      });
-
-      loadHealth().then(() => loadConfig());
-      loadLogs();
-      setInterval(loadHealth, 10000);
-      setInterval(loadLogs, 5000);
+      // Cheap background polling: keeps the interface IPs current as
+      // they get bounced under test, and surfaces auth-fail entries the
+      // moment the master pokes the probe with a bad token.
+      setInterval(refreshHealth, 10000);
+      setInterval(refreshLogs, 5000);
     });
   </script>
 </body>

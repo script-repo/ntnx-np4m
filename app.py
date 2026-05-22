@@ -67,7 +67,7 @@ if __name__ == "__main__" and "app" not in sys.modules:
     sys.modules["app"] = sys.modules[__name__]
 
 __version__ = "0.2.0"
-BUILD = 25   # bump on every commit
+BUILD = 26   # bump on every commit
 
 app = Flask(__name__)
 
@@ -305,19 +305,69 @@ def _format_api_error(payload: Any) -> str:
 def index():
     # Disable browser caching so newly-deployed builds (which inline all
     # JS/CSS in the template) replace the old page on the very next request.
-    template = (
-        "probe.html"
-        if _mode.get_mode() is _mode.Mode.PROBE
-        else "index.html"
-    )
-    resp = make_response(
-        render_template(
-            template,
-            version=__version__,
-            build=BUILD,
-            mode=_mode.get_mode().value,
+    is_probe = _mode.get_mode() is _mode.Mode.PROBE
+    template = "probe.html" if is_probe else "index.html"
+    context: dict[str, Any] = {
+        "version": __version__,
+        "build": BUILD,
+        "mode": _mode.get_mode().value,
+    }
+    if is_probe:
+        # Render the probe page with everything it needs already populated,
+        # so the operator doesn't have to authenticate the browser session
+        # before they can see the agent's current state. Anyone reachable
+        # on the management network can already grab this info via SSH.
+        import socket as _sock
+        import platform as _plat
+        try:
+            import iface as _iface
+            import probe_config as _pc
+            import probe_routes as _pr
+        except Exception:
+            _iface = _pc = _pr = None  # type: ignore[assignment]
+        ifaces: list[dict[str, Any]] = []
+        mgmt_iface = test_iface = None
+        mgmt_ip = test_ip = None
+        current_token = ""
+        auth_required = False
+        logs: list[dict[str, Any]] = []
+        if _iface is not None:
+            try:
+                mgmt_iface = _iface.get_mgmt_iface()
+                test_iface = _iface.get_test_iface()
+                ifaces = _iface.list_interfaces() or []
+                for it in ifaces:
+                    if mgmt_iface and it.get("name") == mgmt_iface:
+                        mgmt_ip = it.get("ipv4")
+                    if test_iface and it.get("name") == test_iface:
+                        test_ip = it.get("ipv4")
+            except Exception:
+                pass
+        if _pc is not None:
+            try:
+                current_token = (_pc.get_token() or "").strip()
+                auth_required = bool(current_token)
+            except Exception:
+                pass
+        if _pr is not None:
+            try:
+                with _pr._log_lock:
+                    logs = list(_pr._log_buffer)[-200:]
+            except Exception:
+                logs = []
+        context.update(
+            hostname=_sock.gethostname(),
+            platform=_plat.platform(),
+            mgmt_iface=mgmt_iface,
+            test_iface=test_iface,
+            mgmt_ip=mgmt_ip,
+            test_ip=test_ip,
+            current_token=current_token,
+            auth_required=auth_required,
+            interfaces=ifaces,
+            recent_logs=logs,
         )
-    )
+    resp = make_response(render_template(template, **context))
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     resp.headers["Pragma"] = "no-cache"
     resp.headers["Expires"] = "0"
