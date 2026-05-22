@@ -3183,12 +3183,20 @@ network_VLAN_1003 1003"></textarea>
         el.className = "banner ok";
         el.innerHTML = `Token sync: <b>OK</b> &mdash; master and probe agree on <code>${escapeHtml(stored)}</code>.`;
       } else {
+        // Build the probe's own URL so the operator can one-click over to
+        // the probe page (which is the only place the full token value is
+        // recoverable once the master has drifted).
+        const scheme = p.use_https ? "https" : "http";
+        const probeUrl = `${scheme}://${p.mgmt_host}:${p.mgmt_port || 5050}/`;
         el.className = "banner err";
         el.innerHTML =
           `Token <b>DESYNC</b> &mdash; master is sending <code>${escapeHtml(stored)}</code> ` +
           `but probe expects <code>${escapeHtml(expected)}</code>. ` +
-          `Click <b>Set...</b> and paste the token the probe currently has, ` +
-          `or click <b>Rotate</b> to generate a fresh one and update both sides at once.`;
+          `<br><b>Fix:</b> open the probe's own page ` +
+          `<a href="${escapeHtml(probeUrl)}" target="_blank" rel="noopener">${escapeHtml(probeUrl)}</a>, ` +
+          `click <b>Generate / rotate</b> there to mint a fresh token (which the probe will display once), ` +
+          `then come back and click <b>Set...</b> here to paste it. ` +
+          `<br>(The master cannot rotate from this side while desynced &mdash; rotation requires the current token to authenticate.)`;
       }
     }
 
