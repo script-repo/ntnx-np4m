@@ -67,7 +67,7 @@ if __name__ == "__main__" and "app" not in sys.modules:
     sys.modules["app"] = sys.modules[__name__]
 
 __version__ = "0.2.0"
-BUILD = 32   # bump on every commit
+BUILD = 33   # bump on every commit
 
 app = Flask(__name__)
 
@@ -1150,6 +1150,124 @@ def _looks_like_pc_dvs_cluster_ref_rejection(detail: str | None) -> bool:
     return _PC_DVS_CLUSTER_REF_REJECTION in detail.lower()
 
 
+# ---------------------------------------------------------------------------
+# v3 fallback subnet create
+#
+# The v4 networking API (/api/networking/v4.0/config/subnets) gates VLAN
+# subnet creation behind Atlas / Advanced Networking, which itself
+# requires AHV 11.0+ AND blocks "basic" subnets when the cluster is on
+# PC DVS. Clusters that are on PC DVS but still on AHV 10.x are
+# therefore unable to create subnets via v4 at all, regardless of body
+# shape. The legacy v3 API (/api/nutanix/v3/subnets) predates both
+# Atlas and PC DVS guardrails and PC keeps it operational for exactly
+# this kind of backwards compatibility, so it's the only working path
+# on older AHV.
+# ---------------------------------------------------------------------------
+
+
+def _create_unmanaged_subnet_v3(
+    session: requests.Session,
+    base_url: str,
+    name: str,
+    vlan: int,
+    cluster_uuid: str,
+    vs_uuid: str | None,
+) -> tuple[int, dict[str, Any]]:
+    """POST a single unmanaged VLAN subnet via the legacy v3 API."""
+    resources: dict[str, Any] = {
+        "subnet_type": "VLAN",
+        "vlan_id": int(vlan),
+    }
+    if vs_uuid:
+        resources["virtual_switch_uuid"] = vs_uuid
+    body = {
+        "api_version": "3.1.0",
+        "metadata": {"kind": "subnet"},
+        "spec": {
+            "name": name,
+            "description": f"Unmanaged VLAN {vlan} subnet (created via web UI, v3)",
+            "resources": resources,
+            "cluster_reference": {
+                "kind": "cluster",
+                "uuid": cluster_uuid,
+            },
+        },
+    }
+    r = session.post(
+        f"{base_url}/api/nutanix/v3/subnets",
+        json=body,
+        timeout=60,
+    )
+    try:
+        return r.status_code, r.json()
+    except ValueError:
+        return r.status_code, {"raw": r.text}
+
+
+def _extract_v3_task_uuid(payload: dict[str, Any]) -> str | None:
+    """v3 returns the task uuid in status.execution_context.task_uuid.
+    A handful of older AOS builds nested it directly under execution_context
+    at the top level, so try both."""
+    if not isinstance(payload, dict):
+        return None
+    for parent_key in ("status", None):
+        parent = payload.get(parent_key) if parent_key else payload
+        if not isinstance(parent, dict):
+            continue
+        ec = parent.get("execution_context")
+        if isinstance(ec, dict):
+            tu = ec.get("task_uuid")
+            if isinstance(tu, str):
+                return tu
+    return None
+
+
+def _wait_for_task_v3(
+    session: requests.Session,
+    base_url: str,
+    task_uuid: str,
+    timeout_seconds: int = 120,
+    poll_interval: float = 2.0,
+) -> dict[str, Any]:
+    """Poll /api/nutanix/v3/tasks/<uuid> until terminal."""
+    deadline = time.time() + timeout_seconds
+    last_status = "UNKNOWN"
+    while time.time() < deadline:
+        r = session.get(
+            f"{base_url}/api/nutanix/v3/tasks/{task_uuid}", timeout=30
+        )
+        r.raise_for_status()
+        body = r.json() or {}
+        last_status = (body.get("status") or "").upper() or last_status
+        if last_status in {"SUCCEEDED", "FAILED", "CANCELED", "CANCELLED", "ABORTED"}:
+            return body
+        time.sleep(poll_interval)
+    raise TimeoutError(
+        f"v3 task {task_uuid} did not finish within {timeout_seconds}s "
+        f"(last status: {last_status})"
+    )
+
+
+def _format_v3_task_error(task: dict[str, Any]) -> str:
+    """v3 tasks report failure detail in a few places depending on AOS
+    build: error_detail, progress_message, message_list[*].message."""
+    if not isinstance(task, dict):
+        return str(task)[:300]
+    bits: list[str] = []
+    for key in ("error_detail", "progress_message"):
+        v = task.get(key)
+        if v:
+            bits.append(str(v))
+    ml = task.get("message_list")
+    if isinstance(ml, list):
+        for m in ml:
+            if isinstance(m, dict):
+                msg = m.get("message") or m.get("reason")
+                if msg:
+                    bits.append(str(msg))
+    return "; ".join(bits) if bits else json.dumps(task)[:300]
+
+
 @app.post("/api/create")
 def api_create():
     body = request.get_json(force=True, silent=True) or {}
@@ -1175,6 +1293,7 @@ def api_create():
         fail = 0
         fallback_count = 0
         pc_dvs_retry_count = 0
+        v3_fallback_count = 0
         yield emit(
             "info",
             f"Starting creation of {len(networks)} subnet(s) on cluster "
@@ -1195,7 +1314,7 @@ def api_create():
 
         def attempt(net_name: str, net_vlan: int, adv: bool,
                     omit_cluster_ref: bool = False):
-            """Single create attempt.
+            """Single v4 create attempt.
 
             Yields ndjson log lines that should be streamed live (e.g. the
             "task waiting..." marker before the long blocking poll).
@@ -1228,6 +1347,35 @@ def api_create():
                 return True, None
             detail = _format_api_error({"data": task}) or tstatus
             return False, f"task {tstatus}: {detail}"
+
+        def attempt_v3(net_name: str, net_vlan: int):
+            """Single v3 create attempt. Used as the final fallback for
+            clusters that v4 refuses (old AHV, PC DVS+basic, etc.)."""
+            try:
+                status, payload = _create_unmanaged_subnet_v3(
+                    pc_session, base_url, net_name, net_vlan,
+                    cluster_uuid, vs_uuid,
+                )
+            except requests.RequestException as exc:
+                return False, f"HTTP error: {exc}"
+            if status not in (200, 201, 202):
+                # v3 returns errors under message_list at the top level;
+                # _format_api_error's heuristic covers that shape too.
+                return False, f"HTTP {status}: {_format_api_error(payload)}"
+            task_uuid = _extract_v3_task_uuid(payload)
+            if not task_uuid:
+                return True, f"HTTP {status}, no v3 task uuid returned"
+            yield emit("info", f"  v3 task {task_uuid} -- waiting...")
+            try:
+                task = _wait_for_task_v3(
+                    pc_session, base_url, task_uuid, timeout_seconds=120
+                )
+            except (TimeoutError, requests.RequestException) as exc:
+                return False, f"v3 task wait failed: {exc}"
+            tstatus = (task.get("status") or "").upper()
+            if tstatus == "SUCCEEDED":
+                return True, None
+            return False, f"v3 task {tstatus}: {_format_v3_task_error(task)}"
 
         for net in networks:
             name = (net or {}).get("name")
@@ -1298,6 +1446,30 @@ def api_create():
                 if ok:
                     fallback_count += 1
 
+            # Final fallback: legacy v3 subnets API.
+            #
+            # Triggered when both v4 paths fail. Covers the otherwise-
+            # dead-zone case of "cluster is on PC DVS (so basic v4 is
+            # blocked) AND AHV is < 11.0 (so advanced v4 is blocked by
+            # Atlas)". v3 predates both guardrails and PC keeps it
+            # operational for backwards compatibility.
+            if not ok:
+                yield emit(
+                    "warn",
+                    f"  '{name}' could not be created via v4 "
+                    f"(either body shape).",
+                )
+                yield emit("warn", f"    last reason: {detail}")
+                yield emit(
+                    "warn",
+                    f"  Retrying '{name}' via legacy v3 subnets API "
+                    f"(works on older AHV / pre-Atlas clusters)...",
+                )
+                ok, detail = yield from attempt_v3(name, vlan_i)
+                flag_used = "v3-legacy"
+                if ok:
+                    v3_fallback_count += 1
+
             if ok:
                 note = f" ({detail})" if detail else ""
                 yield emit(
@@ -1322,6 +1494,10 @@ def api_create():
         if fallback_count:
             notes.append(
                 f"{fallback_count} via isAdvancedNetworking=false fallback"
+            )
+        if v3_fallback_count:
+            notes.append(
+                f"{v3_fallback_count} via legacy v3 subnets API fallback"
             )
         summary_extra = f" ({', '.join(notes)})" if notes else ""
         yield emit(
