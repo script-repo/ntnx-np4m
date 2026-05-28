@@ -973,6 +973,35 @@ network_VLAN_1003 1003"></textarea>
         <button class="secondary" id="btn-clear-log">Clear log</button>
         <span class="status" id="create-status"><span class="dot"></span><span class="text">Idle</span></span>
       </div>
+
+      <!-- Optional Prism Element credentials for the PE-direct fallback.
+           Used only when every PC-routed subnet API path is blocked
+           (e.g. cluster on PC DVS but its AHV is below the Atlas 11.0
+           minimum). Leave blank on healthy clusters. -->
+      <details style="margin-top:10px;">
+        <summary style="cursor:pointer; color:var(--muted);">
+          PE credentials (optional) &mdash; for legacy clusters PC won't let create subnets
+        </summary>
+        <div class="hint" style="margin-top:8px;">
+          Required only when the create log shows
+          <code>VLAN-basic subnet is not supported with PC DVS</code> or
+          <code>do not meet the minimum required version of AHV 11.0</code>.
+          NP4M will fall back to <code>POST /PrismGateway/services/rest/v2.0/networks</code>
+          on the cluster's Prism Element VIP using these creds. The VIP
+          is auto-resolved from PC. Creds are sent only with the create
+          request and not persisted server-side.
+        </div>
+        <div class="row" style="margin-top:6px;">
+          <div class="field" style="flex: 1 1 180px;">
+            <label for="pe-user">PE username</label>
+            <input type="text" id="pe-user" placeholder="admin" autocomplete="username" />
+          </div>
+          <div class="field" style="flex: 1 1 200px;">
+            <label for="pe-pass">PE password</label>
+            <input type="password" id="pe-pass" autocomplete="current-password" />
+          </div>
+        </div>
+      </details>
     </section>
 
     </div> <!-- /tab-pane subnets -->
@@ -1803,6 +1832,11 @@ network_VLAN_1003 1003"></textarea>
             cluster_uuid: clusterUuid,
             vs_uuid: vsUuid,
             networks: state.parsed.networks,
+            // Optional, used only by the PE-direct fallback when every
+            // PC-routed path is blocked (PC DVS + AHV<11). Empty values
+            // are ignored server-side.
+            pe_user: ($("pe-user").value || "").trim(),
+            pe_pass: $("pe-pass").value || "",
           }),
         });
       } catch (e) {

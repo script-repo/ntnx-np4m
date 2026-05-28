@@ -67,7 +67,7 @@ if __name__ == "__main__" and "app" not in sys.modules:
     sys.modules["app"] = sys.modules[__name__]
 
 __version__ = "0.2.0"
-BUILD = 33   # bump on every commit
+BUILD = 34   # bump on every commit
 
 app = Flask(__name__)
 
@@ -1268,6 +1268,130 @@ def _format_v3_task_error(task: dict[str, Any]) -> str:
     return "; ".join(bits) if bits else json.dumps(task)[:300]
 
 
+# ---------------------------------------------------------------------------
+# PE-direct fallback (path 5)
+#
+# Modern PC builds intercept BOTH v4 and v3 subnet creates and route them
+# through the Atlas / PC-DVS guardrail, so the v3 fallback we already
+# have isn't a true bypass on a "PC DVS + AHV <11" cluster. The only
+# remaining option is to skip PC entirely and POST to Prism Element's
+# own /PrismGateway/services/rest/v2.0/networks endpoint, which doesn't
+# know about PC DVS or Atlas and just adds a VLAN on the cluster's OVS.
+#
+# Requires PE credentials (PC doesn't expose them, so the operator
+# supplies them via an optional field in the UI). The PE VIP is
+# discoverable from PC's cluster info API, so the operator only has to
+# provide username + password.
+# ---------------------------------------------------------------------------
+
+
+def _get_cluster_pe_vip(
+    session: requests.Session, base_url: str, cluster_uuid: str,
+) -> str | None:
+    """Return the cluster's external (Prism Element) IP, or None.
+
+    PC v4 cluster object: network.externalAddress.ipv4.value."""
+    try:
+        r = session.get(
+            f"{base_url}/api/clustermgmt/v4.0/config/clusters/{cluster_uuid}",
+            timeout=30,
+        )
+        if r.status_code >= 400:
+            return None
+        body = r.json() or {}
+    except (requests.RequestException, ValueError):
+        return None
+    data = body.get("data") or {}
+    network = data.get("network") or {}
+    ext = network.get("externalAddress") or {}
+    ipv4 = ext.get("ipv4") or {}
+    val = ipv4.get("value")
+    return val if isinstance(val, str) and val else None
+
+
+def _create_unmanaged_subnet_pe(
+    pe_host: str,
+    pe_user: str,
+    pe_pass: str,
+    name: str,
+    vlan: int,
+    vs_uuid: str | None,
+) -> tuple[int, dict[str, Any]]:
+    """POST /PrismGateway/services/rest/v2.0/networks on the cluster's PE.
+
+    PE v2 returns either a synchronous network object or {"task_uuid":..}
+    that the caller must poll. We tolerate both shapes."""
+    body: dict[str, Any] = {
+        "name": name,
+        "vlan_id": int(vlan),
+    }
+    if vs_uuid:
+        body["virtual_switch_uuid"] = vs_uuid
+    try:
+        r = requests.post(
+            f"https://{pe_host}:9440/PrismGateway/services/rest/v2.0/networks",
+            json=body,
+            auth=(pe_user, pe_pass),
+            verify=False,
+            timeout=60,
+        )
+    except requests.RequestException as exc:
+        return 0, {"error": f"HTTP error: {exc}"}
+    try:
+        return r.status_code, r.json()
+    except ValueError:
+        return r.status_code, {"raw": r.text}
+
+
+def _wait_for_pe_task(
+    pe_host: str,
+    pe_user: str,
+    pe_pass: str,
+    task_uuid: str,
+    timeout_seconds: int = 120,
+    poll_interval: float = 2.0,
+) -> dict[str, Any]:
+    """Poll PE's /PrismGateway/services/rest/v2.0/tasks/<uuid> until terminal."""
+    deadline = time.time() + timeout_seconds
+    last_status = "UNKNOWN"
+    while time.time() < deadline:
+        r = requests.get(
+            f"https://{pe_host}:9440/PrismGateway/services/rest/v2.0/tasks/{task_uuid}",
+            auth=(pe_user, pe_pass),
+            verify=False,
+            timeout=30,
+        )
+        if r.status_code >= 400:
+            raise RuntimeError(
+                f"PE task poll HTTP {r.status_code}: {r.text[:200]}"
+            )
+        body = r.json() or {}
+        progress = (body.get("progress_status") or body.get("status") or "").upper()
+        last_status = progress or last_status
+        if last_status in {"SUCCEEDED", "FAILED", "ABORTED", "CANCELED", "CANCELLED"}:
+            return body
+        time.sleep(poll_interval)
+    raise TimeoutError(
+        f"PE task {task_uuid} did not finish within {timeout_seconds}s "
+        f"(last status: {last_status})"
+    )
+
+
+_PC_DVS_ATLAS_PATTERNS = (
+    "vlan-basic subnet is not supported with pc dvs",
+    "minimum required version of ahv",
+    "this cluster can not be used for advanced networking",
+)
+
+
+def _looks_like_pc_dvs_atlas_blocker(detail: str | None) -> bool:
+    """Detect the cluster-state errors that PE-direct exists to bypass."""
+    if not detail:
+        return False
+    low = detail.lower()
+    return any(p in low for p in _PC_DVS_ATLAS_PATTERNS)
+
+
 @app.post("/api/create")
 def api_create():
     body = request.get_json(force=True, silent=True) or {}
@@ -1277,6 +1401,13 @@ def api_create():
     cluster_uuid = body.get("cluster_uuid")
     vs_uuid = body.get("vs_uuid") or None
     networks = body.get("networks") or []
+    # Optional PE credentials for the path-5 PE-direct fallback. When
+    # empty we never attempt PE-direct (we just stop at v3 with the
+    # diagnostic hint). When set, PE-direct fires only AFTER all PC-
+    # routed paths fail, so well-behaved clusters never hit it.
+    pe_user = (body.get("pe_user") or "").strip()
+    pe_pass = body.get("pe_pass") or ""
+    pe_creds_available = bool(pe_user and pe_pass)
     if not cluster_uuid:
         return jsonify(error="cluster_uuid is required"), 400
     if not isinstance(networks, list) or not networks:
@@ -1284,6 +1415,9 @@ def api_create():
 
     pc_session = _make_pc_session(sess["auth"])
     base_url = sess["base_url"]
+    pe_host: str | None = None
+    if pe_creds_available:
+        pe_host = _get_cluster_pe_vip(pc_session, base_url, cluster_uuid)
 
     def emit(level: str, msg: str) -> str:
         return json.dumps({"level": level, "msg": msg}) + "\n"
@@ -1294,6 +1428,8 @@ def api_create():
         fallback_count = 0
         pc_dvs_retry_count = 0
         v3_fallback_count = 0
+        pe_direct_count = 0
+        saw_pc_dvs_atlas_blocker = False
         yield emit(
             "info",
             f"Starting creation of {len(networks)} subnet(s) on cluster "
@@ -1349,8 +1485,8 @@ def api_create():
             return False, f"task {tstatus}: {detail}"
 
         def attempt_v3(net_name: str, net_vlan: int):
-            """Single v3 create attempt. Used as the final fallback for
-            clusters that v4 refuses (old AHV, PC DVS+basic, etc.)."""
+            """Single v3 create attempt. Used as the next-to-last fallback
+            for clusters that v4 refuses (old AHV, PC DVS+basic, etc.)."""
             try:
                 status, payload = _create_unmanaged_subnet_v3(
                     pc_session, base_url, net_name, net_vlan,
@@ -1376,6 +1512,45 @@ def api_create():
             if tstatus == "SUCCEEDED":
                 return True, None
             return False, f"v3 task {tstatus}: {_format_v3_task_error(task)}"
+
+        def attempt_pe(net_name: str, net_vlan: int):
+            """Final fallback: bypass PC, talk to the cluster's Prism
+            Element v2 networks API directly. Required for clusters
+            stuck in 'PC DVS + AHV<11' state where every PC-routed path
+            is blocked by the Atlas guardrail."""
+            if not pe_creds_available:
+                return False, "PE credentials not provided"
+            if not pe_host:
+                return False, "PE VIP could not be resolved from PC"
+            status, payload = _create_unmanaged_subnet_pe(
+                pe_host, pe_user, pe_pass, net_name, net_vlan, vs_uuid,
+            )
+            if status == 0:
+                return False, str(payload.get("error") or "PE request failed")
+            if status not in (200, 201, 202):
+                detail = (
+                    payload.get("message")
+                    or payload.get("error")
+                    or (payload.get("message_list") or [{}])[0].get("message")
+                    or str(payload)[:200]
+                )
+                return False, f"PE HTTP {status}: {detail}"
+            # PE v2 returns either a synchronous network object, or a
+            # task_uuid; tolerate both.
+            task_uuid = payload.get("task_uuid")
+            if not task_uuid:
+                return True, f"PE HTTP {status} (synchronous)"
+            yield emit("info", f"  PE task {task_uuid} -- waiting...")
+            try:
+                task = _wait_for_pe_task(
+                    pe_host, pe_user, pe_pass, task_uuid, timeout_seconds=120
+                )
+            except (TimeoutError, RuntimeError, requests.RequestException) as exc:
+                return False, f"PE task wait failed: {exc}"
+            tstatus = (task.get("progress_status") or task.get("status") or "").upper()
+            if tstatus == "SUCCEEDED":
+                return True, None
+            return False, f"PE task {tstatus}: {task.get('message_list') or task}"
 
         for net in networks:
             name = (net or {}).get("name")
@@ -1446,13 +1621,13 @@ def api_create():
                 if ok:
                     fallback_count += 1
 
-            # Final fallback: legacy v3 subnets API.
+            # Path 4: legacy v3 subnets API via PC.
             #
-            # Triggered when both v4 paths fail. Covers the otherwise-
-            # dead-zone case of "cluster is on PC DVS (so basic v4 is
-            # blocked) AND AHV is < 11.0 (so advanced v4 is blocked by
-            # Atlas)". v3 predates both guardrails and PC keeps it
-            # operational for backwards compatibility.
+            # Triggered when both v4 paths fail. Helps on some pre-Atlas
+            # PC builds; modern PC builds intercept v3 and route it
+            # through the same Atlas guardrail though, so this can still
+            # bounce on "PC DVS + AHV<11" clusters -- in that case path
+            # 5 (PE-direct) is the only working option.
             if not ok:
                 yield emit(
                     "warn",
@@ -1469,6 +1644,30 @@ def api_create():
                 flag_used = "v3-legacy"
                 if ok:
                     v3_fallback_count += 1
+
+            # Path 5: PE-direct (bypass PC entirely).
+            #
+            # Only fires when PE credentials are supplied AND every PC-
+            # routed path has failed. This is the escape hatch for
+            # "PC DVS + AHV<11" clusters where PC blocks subnet creation
+            # at every API surface.
+            if not ok and _looks_like_pc_dvs_atlas_blocker(detail):
+                saw_pc_dvs_atlas_blocker = True
+            if not ok and pe_creds_available:
+                yield emit(
+                    "warn",
+                    f"  '{name}' could not be created via any PC path.",
+                )
+                yield emit("warn", f"    last reason: {detail}")
+                yield emit(
+                    "warn",
+                    f"  Retrying '{name}' against PE directly at "
+                    f"{pe_host or '(VIP not resolved)'} ...",
+                )
+                ok, detail = yield from attempt_pe(name, vlan_i)
+                flag_used = "pe-direct"
+                if ok:
+                    pe_direct_count += 1
 
             if ok:
                 note = f" ({detail})" if detail else ""
@@ -1499,12 +1698,44 @@ def api_create():
             notes.append(
                 f"{v3_fallback_count} via legacy v3 subnets API fallback"
             )
+        if pe_direct_count:
+            notes.append(
+                f"{pe_direct_count} via PE-direct fallback"
+            )
         summary_extra = f" ({', '.join(notes)})" if notes else ""
         yield emit(
             "info",
             f"Done. {success} succeeded{summary_extra}, "
             f"{fail} failed (of {len(networks)}).",
         )
+
+        # Actionable hint when this run hit the well-known dead zone but
+        # no PE creds were available to escape it. Surfaced once at the
+        # end of the run so the operator doesn't have to recognize the
+        # pattern themselves.
+        if saw_pc_dvs_atlas_blocker and not pe_creds_available:
+            yield emit(
+                "warn",
+                "Hint: this cluster is on PC DVS but its AHV nodes are below "
+                "the 11.0 Atlas minimum, so every PC-routed subnet API path "
+                "is blocked. Either:",
+            )
+            yield emit(
+                "warn",
+                "  - upgrade AHV on the cluster to 11.0 or newer (PC-managed,"
+                " supported), or",
+            )
+            yield emit(
+                "warn",
+                "  - un-onboard the cluster from PC DVS (legacy v4-basic / v3"
+                " paths will work again), or",
+            )
+            yield emit(
+                "warn",
+                "  - paste PE credentials in the 'PE credentials' field below "
+                "the Create button and rerun -- NP4M will bypass PC and create"
+                " the subnet directly on Prism Element.",
+            )
 
     return Response(
         stream_with_context(gen()),
