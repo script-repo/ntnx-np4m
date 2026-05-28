@@ -67,7 +67,7 @@ if __name__ == "__main__" and "app" not in sys.modules:
     sys.modules["app"] = sys.modules[__name__]
 
 __version__ = "0.2.0"
-BUILD = 31   # bump on every commit
+BUILD = 32   # bump on every commit
 
 app = Flask(__name__)
 
@@ -1092,24 +1092,35 @@ def _create_unmanaged_subnet(
     cluster_uuid: str,
     vs_uuid: str | None,
     advanced: bool = True,
+    omit_cluster_ref: bool = False,
 ) -> tuple[int, dict[str, Any]]:
     """POST a single unmanaged VLAN subnet.
 
-    `advanced` controls the `isAdvancedNetworking` body field. The default is
-    True so the resulting subnet can later participate in Flow / VPC features
-    without a migration. Callers should fall back to `advanced=False` if the
-    target cluster rejects the advanced flag (e.g. FNS / Flow Networking is
-    not licensed or not enabled).
+    `advanced` controls the `isAdvancedNetworking` body field. The default
+    is True so the resulting subnet can later participate in Flow / VPC
+    features without a migration. Callers should fall back to
+    `advanced=False` if the target cluster rejects the advanced flag (e.g.
+    FNS / Flow Networking is not licensed or not enabled).
+
+    `omit_cluster_ref` drops ``clusterReference`` from the body. PC
+    requires this when the target cluster is registered with PC DVS
+    (the virtual-switch reference already identifies the cluster, and
+    PC rejects bodies that supply both with
+    "Cluster UUID cannot be provided with virtual switch UUID in case
+    of PC DVS"). On legacy (per-cluster VS) clusters PC requires the
+    opposite, so callers retry without this flag first and only set it
+    on the second pass.
     """
     body: dict[str, Any] = {
         "name": name,
         "description": f"Unmanaged VLAN {vlan} subnet (created via web UI)",
         "subnetType": "VLAN",
         "networkId": vlan,
-        "clusterReference": cluster_uuid,
         "isExternal": False,
         "isAdvancedNetworking": bool(advanced),
     }
+    if not omit_cluster_ref:
+        body["clusterReference"] = cluster_uuid
     if vs_uuid:
         body["virtualSwitchReference"] = vs_uuid
     headers = {"NTNX-Request-Id": str(uuid.uuid4())}
@@ -1123,6 +1134,20 @@ def _create_unmanaged_subnet(
         return r.status_code, r.json()
     except ValueError:
         return r.status_code, {"raw": r.text}
+
+
+_PC_DVS_CLUSTER_REF_REJECTION = (
+    "cluster uuid cannot be provided with virtual switch uuid"
+)
+
+
+def _looks_like_pc_dvs_cluster_ref_rejection(detail: str | None) -> bool:
+    """Detect PC's "drop clusterReference on PC DVS" rejection by its
+    error string. Substring match so PC build-to-build wording drift
+    (e.g. punctuation, trailing "Kindly retry...") is tolerated."""
+    if not detail:
+        return False
+    return _PC_DVS_CLUSTER_REF_REJECTION in detail.lower()
 
 
 @app.post("/api/create")
@@ -1149,6 +1174,7 @@ def api_create():
         success = 0
         fail = 0
         fallback_count = 0
+        pc_dvs_retry_count = 0
         yield emit(
             "info",
             f"Starting creation of {len(networks)} subnet(s) on cluster "
@@ -1167,7 +1193,8 @@ def api_create():
             f"{'(first 100 only -- pagination not implemented)' if truncated else ''}".rstrip(),
         )
 
-        def attempt(net_name: str, net_vlan: int, adv: bool):
+        def attempt(net_name: str, net_vlan: int, adv: bool,
+                    omit_cluster_ref: bool = False):
             """Single create attempt.
 
             Yields ndjson log lines that should be streamed live (e.g. the
@@ -1180,6 +1207,7 @@ def api_create():
                 status, payload = _create_unmanaged_subnet(
                     pc_session, base_url, net_name, net_vlan,
                     cluster_uuid, vs_uuid, advanced=adv,
+                    omit_cluster_ref=omit_cluster_ref,
                 )
             except requests.RequestException as exc:
                 return False, f"HTTP error: {exc}"
@@ -1231,6 +1259,29 @@ def api_create():
             ok, detail = yield from attempt(name, vlan_i, adv=True)
             flag_used = "isAdvancedNetworking=true"
 
+            # PC-DVS-specific path: PC explicitly rejects clusterReference
+            # when the cluster is on PC DVS ("Cluster UUID cannot be
+            # provided with virtual switch UUID in case of PC DVS"). Retry
+            # advanced WITHOUT clusterReference before falling back to the
+            # basic path (which PC DVS forbids entirely).
+            if not ok and _looks_like_pc_dvs_cluster_ref_rejection(detail):
+                yield emit(
+                    "warn",
+                    f"  '{name}' rejected because cluster + VS were sent "
+                    f"together (PC DVS contract).",
+                )
+                yield emit(
+                    "warn",
+                    f"  Retrying '{name}' with isAdvancedNetworking=true "
+                    f"(no clusterReference)...",
+                )
+                ok, detail = yield from attempt(
+                    name, vlan_i, adv=True, omit_cluster_ref=True,
+                )
+                flag_used = "isAdvancedNetworking=true,no clusterRef"
+                if ok:
+                    pc_dvs_retry_count += 1
+
             if not ok:
                 yield emit(
                     "warn",
@@ -1263,11 +1314,16 @@ def api_create():
                 )
                 fail += 1
 
-        summary_extra = (
-            f" ({fallback_count} via isAdvancedNetworking=false fallback)"
-            if fallback_count
-            else ""
-        )
+        notes = []
+        if pc_dvs_retry_count:
+            notes.append(
+                f"{pc_dvs_retry_count} via PC-DVS no-clusterRef retry"
+            )
+        if fallback_count:
+            notes.append(
+                f"{fallback_count} via isAdvancedNetworking=false fallback"
+            )
+        summary_extra = f" ({', '.join(notes)})" if notes else ""
         yield emit(
             "info",
             f"Done. {success} succeeded{summary_extra}, "
