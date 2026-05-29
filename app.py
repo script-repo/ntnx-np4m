@@ -67,7 +67,7 @@ if __name__ == "__main__" and "app" not in sys.modules:
     sys.modules["app"] = sys.modules[__name__]
 
 __version__ = "0.2.0"
-BUILD = 34   # bump on every commit
+BUILD = 35   # bump on every commit
 
 app = Flask(__name__)
 
@@ -1055,11 +1055,18 @@ def api_target_subnets():
     )
 
 
-def _list_existing_subnet_names_on_cluster(
+def _list_existing_subnets_on_cluster(
     session: requests.Session, base_url: str, cluster_uuid: str
-) -> tuple[set[str], bool]:
-    """Return (existing_names_lowercased, was_truncated_at_100)."""
+) -> tuple[set[str], set[int], bool]:
+    """Return (existing_names_lowercased, existing_vlan_ids, truncated).
+
+    VLAN ids are tracked alongside names so the create loop can refuse to
+    create a second subnet on a VLAN that already has one. A duplicate
+    VLAN is the main thing that breaks clean Atlas adoption when a
+    PC-DVS + AHV<11 cluster is later upgraded: Atlas can't unambiguously
+    adopt two networks sharing a VLAN id."""
     names: set[str] = set()
+    vlans: set[int] = set()
     truncated = False
     try:
         r = session.get(
@@ -1067,9 +1074,9 @@ def _list_existing_subnet_names_on_cluster(
             timeout=20,
         )
     except requests.RequestException:
-        return names, False
+        return names, vlans, False
     if r.status_code >= 400:
-        return names, False
+        return names, vlans, False
     body = r.json() or {}
     data = body.get("data") or []
     meta = body.get("metadata") or {}
@@ -1078,10 +1085,15 @@ def _list_existing_subnet_names_on_cluster(
             n = sub.get("name")
             if n:
                 names.add(n.lower())
+            vid = sub.get("networkId")
+            if isinstance(vid, int):
+                vlans.add(vid)
+            elif isinstance(vid, str) and vid.isdigit():
+                vlans.add(int(vid))
     total = meta.get("totalAvailableResults")
     if isinstance(total, int) and total > len(data):
         truncated = True
-    return names, truncated
+    return names, vlans, truncated
 
 
 def _create_unmanaged_subnet(
@@ -1392,6 +1404,206 @@ def _looks_like_pc_dvs_atlas_blocker(detail: str | None) -> bool:
     return any(p in low for p in _PC_DVS_ATLAS_PATTERNS)
 
 
+# ---------------------------------------------------------------------------
+# Cluster capability detection
+#
+# Lets the UI route a subnet-create straight to the method that will work
+# instead of cascading through four PC paths and only then falling back to
+# PE-direct. The binding constraint is the per-node AHV version: Atlas /
+# advanced networking requires AHV 11.0+, and on a PC-DVS cluster the
+# legacy "basic" v4/v3 paths are also blocked -- so a "PC DVS + AHV<11"
+# cluster can only be served via PE-direct.
+# ---------------------------------------------------------------------------
+
+# AHV minimum (major) required by Atlas / advanced networking.
+_ATLAS_MIN_AHV_MAJOR = 11
+
+
+def _parse_ahv_major(version: str | None) -> int | None:
+    """Map an AHV version string to a comparable 'major' number for the
+    Atlas '>= 11.0' check.
+
+    Nutanix rebased AHV versioning: the modern scheme is 10.x / 11.x /
+    etc., while legacy AHV used date-based bundle versions like
+    '20220304.420'. Any date-like (>= 1000) leading number is a legacy
+    build that predates the rebase and is therefore below the AHV 11.0
+    Atlas minimum, so we map it to 0. A small leading integer is treated
+    as the modern major version. Returns None if no number is found."""
+    if not version:
+        return None
+    m = re.search(r"(\d+)", str(version))
+    if not m:
+        return None
+    n = int(m.group(1))
+    if n >= 1000:  # date-like / legacy bundle versioning -> below AHV 11
+        return 0
+    return n
+
+
+def _extract_host_ahv_version(host: dict[str, Any]) -> str | None:
+    """Best-effort pull of a host's AHV version string from the v4
+    clustermgmt host object. Field names vary across PC builds, so we
+    probe a handful of likely locations and return the first that
+    contains a digit."""
+    candidates: list[str] = []
+    hv = host.get("hypervisor")
+    if isinstance(hv, dict):
+        for k in ("hypervisorFullName", "fullName", "version", "ahvVersion"):
+            v = hv.get(k)
+            if isinstance(v, str) and v:
+                candidates.append(v)
+    for k in ("hypervisorFullName", "ahvVersion", "hypervisorVersion"):
+        v = host.get(k)
+        if isinstance(v, str) and v:
+            candidates.append(v)
+    for c in candidates:
+        if re.search(r"\d", c):
+            return c
+    return candidates[0] if candidates else None
+
+
+def _get_cluster_min_ahv_version(
+    session: requests.Session, base_url: str, cluster_uuid: str,
+) -> tuple[str | None, int | None]:
+    """Return (raw_min_version_string, min_major) across the cluster's
+    AHV hosts, or (None, None) if it can't be determined (caller should
+    fail safe)."""
+    try:
+        r = session.get(
+            f"{base_url}/api/clustermgmt/v4.0/config/clusters/"
+            f"{cluster_uuid}/hosts?$limit=100",
+            timeout=30,
+        )
+        if r.status_code >= 400:
+            return None, None
+        body = r.json() or {}
+    except (requests.RequestException, ValueError):
+        return None, None
+    hosts = body.get("data") or []
+    best_major: int | None = None
+    best_raw: str | None = None
+    for h in hosts:
+        if not isinstance(h, dict):
+            continue
+        raw = _extract_host_ahv_version(h)
+        major = _parse_ahv_major(raw)
+        if major is None:
+            continue
+        if best_major is None or major < best_major:
+            best_major = major
+            best_raw = raw
+    return best_raw, best_major
+
+
+def _detect_pc_dvs(
+    session: requests.Session, base_url: str, cluster_uuid: str,
+) -> bool | None:
+    """Best-effort: is this cluster managed by a PC-managed distributed
+    virtual switch (PC DVS)? Returns True/False when a marker can be
+    read, or None when undeterminable (caller should fail safe toward
+    'PE-direct required').
+
+    The v4 virtual-switch object doesn't expose a single stable
+    'PC managed' boolean across builds, so we probe several candidate
+    fields. If none are present we return None rather than guessing."""
+    try:
+        r = session.get(
+            f"{base_url}/api/networking/v4.0/config/virtual-switches?$limit=100",
+            timeout=20,
+        )
+        if r.status_code >= 400:
+            return None
+        data = (r.json() or {}).get("data") or []
+    except (requests.RequestException, ValueError):
+        return None
+
+    saw_marker = False
+    for vs in data:
+        if not isinstance(vs, dict):
+            continue
+        cluster_uuids: list[str] = []
+        for cl in vs.get("clusters") or []:
+            if isinstance(cl, dict):
+                ext = cl.get("extId") or cl.get("uuid")
+                if ext:
+                    cluster_uuids.append(ext)
+            elif isinstance(cl, str):
+                cluster_uuids.append(cl)
+        if cluster_uuids and cluster_uuid not in cluster_uuids:
+            continue
+        # Candidate PC-managed markers seen across PC builds.
+        for key in ("isPcManaged", "pcManaged"):
+            v = vs.get(key)
+            if isinstance(v, bool):
+                saw_marker = True
+                if v:
+                    return True
+        scope = vs.get("managementScope") or vs.get("type")
+        if isinstance(scope, str):
+            saw_marker = True
+            if "pc" in scope.lower() or "central" in scope.lower():
+                return True
+        meta = vs.get("metadata")
+        if isinstance(meta, dict):
+            managed_by = meta.get("managedBy") or meta.get("owner")
+            if isinstance(managed_by, str):
+                saw_marker = True
+                if "pc" in managed_by.lower() or "central" in managed_by.lower():
+                    return True
+    return False if saw_marker else None
+
+
+@app.post("/api/cluster-capability")
+def api_cluster_capability():
+    """Report which subnet-create method will work on a cluster, so the
+    UI can route up front and prompt for PE credentials only when they're
+    actually required.
+
+    recommended_method is one of:
+      - "v4-advanced": AHV >= 11, advanced networking available (paths 1-2)
+      - "v4-basic":    AHV < 11 but NOT on PC DVS (legacy v4-basic / v3 ok)
+      - "pe-direct":   AHV < 11 AND on PC DVS (or PC-DVS state unknown);
+                       requires PE credentials
+    """
+    body = request.get_json(force=True, silent=True) or {}
+    sess = _get_session(body.get("token"))
+    if not sess:
+        return jsonify(error="not connected"), 401
+    cluster_uuid = (body.get("cluster_uuid") or "").strip()
+    if not cluster_uuid:
+        return jsonify(error="cluster_uuid is required"), 400
+    s = _make_pc_session(sess["auth"])
+    base_url = sess["base_url"]
+
+    min_raw, min_major = _get_cluster_min_ahv_version(s, base_url, cluster_uuid)
+    advanced_ready = bool(min_major is not None and min_major >= _ATLAS_MIN_AHV_MAJOR)
+    on_pc_dvs = _detect_pc_dvs(s, base_url, cluster_uuid)
+
+    if advanced_ready:
+        method = "v4-advanced"
+        pe_required = False
+    elif on_pc_dvs is False:
+        # AHV < 11 (or unknown) but definitively NOT on PC DVS: the legacy
+        # v4-basic / v3 paths still work, no PE creds needed.
+        method = "v4-basic"
+        pe_required = False
+    else:
+        # AHV < 11 (or unknown) AND on PC DVS (or PC-DVS state unknown):
+        # every PC-routed path is blocked. Fail safe toward PE-direct.
+        method = "pe-direct"
+        pe_required = True
+
+    return jsonify(
+        cluster_uuid=cluster_uuid,
+        min_ahv_version=min_raw,
+        min_ahv_major=min_major,
+        advanced_networking_ready=advanced_ready,
+        on_pc_dvs=on_pc_dvs,
+        pe_direct_required=pe_required,
+        recommended_method=method,
+    )
+
+
 @app.post("/api/create")
 def api_create():
     body = request.get_json(force=True, silent=True) or {}
@@ -1408,6 +1620,13 @@ def api_create():
     pe_user = (body.get("pe_user") or "").strip()
     pe_pass = body.get("pe_pass") or ""
     pe_creds_available = bool(pe_user and pe_pass)
+    # Capability verdict from /api/cluster-capability (UI sends it so the
+    # backend routes each subnet straight to the working path instead of
+    # cascading through every API surface). Unknown/absent -> "auto",
+    # which preserves the legacy full cascade as a safety net.
+    recommended_method = (body.get("recommended_method") or "auto").strip().lower()
+    if recommended_method not in ("auto", "v4-advanced", "v4-basic", "pe-direct"):
+        recommended_method = "auto"
     if not cluster_uuid:
         return jsonify(error="cluster_uuid is required"), 400
     if not isinstance(networks, list) or not networks:
@@ -1439,7 +1658,7 @@ def api_create():
             yield emit("info", f"Virtual switch: {vs_uuid}")
         else:
             yield emit("info", "Virtual switch: <default>")
-        existing_names, truncated = _list_existing_subnet_names_on_cluster(
+        existing_names, existing_vlans, truncated = _list_existing_subnets_on_cluster(
             pc_session, base_url, cluster_uuid
         )
         yield emit(
@@ -1552,6 +1771,52 @@ def api_create():
                 return True, None
             return False, f"PE task {tstatus}: {task.get('message_list') or task}"
 
+        def verify_pc_reconciled(net_name: str, net_vlan: int):
+            """Poll PC's v4 subnets list until the PE-created subnet shows
+            up with a v4 extId (or a bounded timeout elapses).
+
+            A PE-direct create writes straight to Prism Element, so PC has
+            to reconcile it before it's selectable as a probe target and
+            before Atlas can cleanly adopt it on an AHV 11+ upgrade. We
+            match by VLAN id on this cluster (name as a secondary check)."""
+            deadline = time.monotonic() + 60
+            poll = 3
+            while time.monotonic() < deadline:
+                try:
+                    r = pc_session.get(
+                        f"{base_url}/api/networking/v4.0/config/subnets"
+                        f"?$limit=100",
+                        timeout=20,
+                    )
+                    data = (r.json() or {}).get("data") or [] if r.status_code < 400 else []
+                except (requests.RequestException, ValueError):
+                    data = []
+                for sub in data:
+                    if sub.get("clusterReference") != cluster_uuid:
+                        continue
+                    vid = sub.get("networkId")
+                    try:
+                        vid_i = int(vid)
+                    except (TypeError, ValueError):
+                        continue
+                    if vid_i != net_vlan:
+                        continue
+                    ext = sub.get("extId")
+                    if ext:
+                        yield emit(
+                            "ok",
+                            f"  PC reconciled '{net_name}' (VLAN {net_vlan}): "
+                            f"extId {ext}.",
+                        )
+                        return
+                time.sleep(poll)
+            yield emit(
+                "warn",
+                f"  PC has not yet reconciled '{net_name}' (VLAN {net_vlan}) "
+                f"after 60s. The subnet exists on PE; it should appear in PC "
+                f"shortly. Re-check before using it as a probe target.",
+            )
+
         for net in networks:
             name = (net or {}).get("name")
             vlan = (net or {}).get("vlan")
@@ -1573,101 +1838,157 @@ def api_create():
                 )
                 fail += 1
                 continue
+            if vlan_i in existing_vlans:
+                # Clean-adoption safeguard: refuse to create a second
+                # subnet on a VLAN that already has one. A duplicate VLAN
+                # is what breaks Atlas auto-adoption when this cluster is
+                # later upgraded to AHV 11+ (two networks share a VLAN id).
+                yield emit(
+                    "error",
+                    f"Skipping '{name}': VLAN {vlan_i} already has a subnet "
+                    f"on this cluster (creating a duplicate would block "
+                    f"clean Atlas adoption after an AHV 11+ upgrade).",
+                )
+                fail += 1
+                continue
 
-            yield emit(
-                "info",
-                f"Creating '{name}' (VLAN {vlan_i}) "
-                f"with isAdvancedNetworking=true...",
-            )
-            ok, detail = yield from attempt(name, vlan_i, adv=True)
-            flag_used = "isAdvancedNetworking=true"
+            # ---- Route to the method the capability probe recommends ----
+            # "auto" (no verdict from the UI) keeps the legacy full
+            # cascade (path 1 -> 5) as a safety net. A specific
+            # recommendation goes straight to the path known to work for
+            # this cluster, so the log isn't full of expected-failure
+            # noise.
+            ok = False
+            detail = None
+            flag_used = "?"
 
-            # PC-DVS-specific path: PC explicitly rejects clusterReference
-            # when the cluster is on PC DVS ("Cluster UUID cannot be
-            # provided with virtual switch UUID in case of PC DVS"). Retry
-            # advanced WITHOUT clusterReference before falling back to the
-            # basic path (which PC DVS forbids entirely).
-            if not ok and _looks_like_pc_dvs_cluster_ref_rejection(detail):
-                yield emit(
-                    "warn",
-                    f"  '{name}' rejected because cluster + VS were sent "
-                    f"together (PC DVS contract).",
-                )
-                yield emit(
-                    "warn",
-                    f"  Retrying '{name}' with isAdvancedNetworking=true "
-                    f"(no clusterReference)...",
-                )
-                ok, detail = yield from attempt(
-                    name, vlan_i, adv=True, omit_cluster_ref=True,
-                )
-                flag_used = "isAdvancedNetworking=true,no clusterRef"
-                if ok:
-                    pc_dvs_retry_count += 1
+            if recommended_method == "pe-direct":
+                # PC DVS + AHV<11: every PC-routed path is blocked, go
+                # straight to PE-direct.
+                flag_used = "pe-direct"
+                if not pe_creds_available:
+                    saw_pc_dvs_atlas_blocker = True
+                    detail = (
+                        "cluster requires PE-direct (PC DVS + AHV<11) but no "
+                        "PE credentials were provided"
+                    )
+                else:
+                    yield emit(
+                        "info",
+                        f"Creating '{name}' (VLAN {vlan_i}) via PE-direct at "
+                        f"{pe_host or '(VIP not resolved)'} "
+                        f"(cluster is PC DVS + AHV<11)...",
+                    )
+                    ok, detail = yield from attempt_pe(name, vlan_i)
+                    if ok:
+                        pe_direct_count += 1
 
-            if not ok:
+            elif recommended_method == "v4-basic":
+                # AHV<11 but NOT on PC DVS: legacy basic / v3 work.
                 yield emit(
-                    "warn",
-                    f"  '{name}' could not be created with "
-                    f"isAdvancedNetworking=true.",
-                )
-                yield emit("warn", f"    reason: {detail}")
-                yield emit(
-                    "warn",
-                    f"  Retrying '{name}' with isAdvancedNetworking=false...",
+                    "info",
+                    f"Creating '{name}' (VLAN {vlan_i}) with "
+                    f"isAdvancedNetworking=false (legacy non-DVS cluster)...",
                 )
                 ok, detail = yield from attempt(name, vlan_i, adv=False)
                 flag_used = "isAdvancedNetworking=false"
-                if ok:
-                    fallback_count += 1
+                if not ok:
+                    yield emit("warn", f"    reason: {detail}")
+                    yield emit(
+                        "warn",
+                        f"  Retrying '{name}' via legacy v3 subnets API...",
+                    )
+                    ok, detail = yield from attempt_v3(name, vlan_i)
+                    flag_used = "v3-legacy"
+                    if ok:
+                        v3_fallback_count += 1
 
-            # Path 4: legacy v3 subnets API via PC.
-            #
-            # Triggered when both v4 paths fail. Helps on some pre-Atlas
-            # PC builds; modern PC builds intercept v3 and route it
-            # through the same Atlas guardrail though, so this can still
-            # bounce on "PC DVS + AHV<11" clusters -- in that case path
-            # 5 (PE-direct) is the only working option.
-            if not ok:
+            else:
+                # "v4-advanced" or "auto": start at the advanced path.
                 yield emit(
-                    "warn",
-                    f"  '{name}' could not be created via v4 "
-                    f"(either body shape).",
+                    "info",
+                    f"Creating '{name}' (VLAN {vlan_i}) "
+                    f"with isAdvancedNetworking=true...",
                 )
-                yield emit("warn", f"    last reason: {detail}")
-                yield emit(
-                    "warn",
-                    f"  Retrying '{name}' via legacy v3 subnets API "
-                    f"(works on older AHV / pre-Atlas clusters)...",
-                )
-                ok, detail = yield from attempt_v3(name, vlan_i)
-                flag_used = "v3-legacy"
-                if ok:
-                    v3_fallback_count += 1
+                ok, detail = yield from attempt(name, vlan_i, adv=True)
+                flag_used = "isAdvancedNetworking=true"
 
-            # Path 5: PE-direct (bypass PC entirely).
-            #
-            # Only fires when PE credentials are supplied AND every PC-
-            # routed path has failed. This is the escape hatch for
-            # "PC DVS + AHV<11" clusters where PC blocks subnet creation
-            # at every API surface.
-            if not ok and _looks_like_pc_dvs_atlas_blocker(detail):
-                saw_pc_dvs_atlas_blocker = True
-            if not ok and pe_creds_available:
-                yield emit(
-                    "warn",
-                    f"  '{name}' could not be created via any PC path.",
-                )
-                yield emit("warn", f"    last reason: {detail}")
-                yield emit(
-                    "warn",
-                    f"  Retrying '{name}' against PE directly at "
-                    f"{pe_host or '(VIP not resolved)'} ...",
-                )
-                ok, detail = yield from attempt_pe(name, vlan_i)
-                flag_used = "pe-direct"
-                if ok:
-                    pe_direct_count += 1
+                # Same-family retry: PC rejects clusterReference when the
+                # cluster is on PC DVS. Retry advanced WITHOUT it. This is
+                # kept for both v4-advanced and auto since it's a cheap,
+                # non-noisy correction of the body shape.
+                if not ok and _looks_like_pc_dvs_cluster_ref_rejection(detail):
+                    yield emit(
+                        "warn",
+                        f"  '{name}' rejected because cluster + VS were sent "
+                        f"together (PC DVS contract).",
+                    )
+                    yield emit(
+                        "warn",
+                        f"  Retrying '{name}' with isAdvancedNetworking=true "
+                        f"(no clusterReference)...",
+                    )
+                    ok, detail = yield from attempt(
+                        name, vlan_i, adv=True, omit_cluster_ref=True,
+                    )
+                    flag_used = "isAdvancedNetworking=true,no clusterRef"
+                    if ok:
+                        pc_dvs_retry_count += 1
+
+                # Only "auto" continues into the noisy cross-API cascade.
+                # A "v4-advanced" verdict means the cluster is known
+                # Atlas-capable, so we stop after the advanced attempts.
+                if recommended_method == "auto":
+                    if not ok:
+                        yield emit(
+                            "warn",
+                            f"  '{name}' could not be created with "
+                            f"isAdvancedNetworking=true.",
+                        )
+                        yield emit("warn", f"    reason: {detail}")
+                        yield emit(
+                            "warn",
+                            f"  Retrying '{name}' with isAdvancedNetworking=false...",
+                        )
+                        ok, detail = yield from attempt(name, vlan_i, adv=False)
+                        flag_used = "isAdvancedNetworking=false"
+                        if ok:
+                            fallback_count += 1
+
+                    if not ok:
+                        yield emit(
+                            "warn",
+                            f"  '{name}' could not be created via v4 "
+                            f"(either body shape).",
+                        )
+                        yield emit("warn", f"    last reason: {detail}")
+                        yield emit(
+                            "warn",
+                            f"  Retrying '{name}' via legacy v3 subnets API "
+                            f"(works on older AHV / pre-Atlas clusters)...",
+                        )
+                        ok, detail = yield from attempt_v3(name, vlan_i)
+                        flag_used = "v3-legacy"
+                        if ok:
+                            v3_fallback_count += 1
+
+                    if not ok and _looks_like_pc_dvs_atlas_blocker(detail):
+                        saw_pc_dvs_atlas_blocker = True
+                    if not ok and pe_creds_available:
+                        yield emit(
+                            "warn",
+                            f"  '{name}' could not be created via any PC path.",
+                        )
+                        yield emit("warn", f"    last reason: {detail}")
+                        yield emit(
+                            "warn",
+                            f"  Retrying '{name}' against PE directly at "
+                            f"{pe_host or '(VIP not resolved)'} ...",
+                        )
+                        ok, detail = yield from attempt_pe(name, vlan_i)
+                        flag_used = "pe-direct"
+                        if ok:
+                            pe_direct_count += 1
 
             if ok:
                 note = f" ({detail})" if detail else ""
@@ -1676,6 +1997,14 @@ def api_create():
                     f"  OK: '{name}' created [{flag_used}]{note}.",
                 )
                 existing_names.add(name.lower())
+                existing_vlans.add(vlan_i)
+                # Clean-adoption verification: a PE-direct create bypasses
+                # PC, so confirm PC's reconciler actually picked the subnet
+                # up (and report its v4 extId, which is what the probe NIC
+                # swap selects by). PC-routed paths are already consistent
+                # with PC, so we only verify the PE-direct case.
+                if flag_used == "pe-direct":
+                    yield from verify_pc_reconciled(name, vlan_i)
                 success += 1
             else:
                 yield emit(

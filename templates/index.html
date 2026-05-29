@@ -212,6 +212,36 @@
       margin-bottom: 14px;
     }
 
+    .cap-badge {
+      margin-top: 10px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      display: inline-block;
+      border: 1px solid transparent;
+    }
+    .cap-badge.cap-adv {
+      background: rgba(34,197,94,0.12);
+      border-color: rgba(34,197,94,0.5);
+      color: #16a34a;
+    }
+    .cap-badge.cap-basic {
+      background: rgba(234,179,8,0.12);
+      border-color: rgba(234,179,8,0.5);
+      color: #b45309;
+    }
+    .cap-badge.cap-pe {
+      background: rgba(239,68,68,0.12);
+      border-color: rgba(239,68,68,0.5);
+      color: #dc2626;
+    }
+    .cap-badge.cap-unknown {
+      background: rgba(148,163,184,0.15);
+      border-color: rgba(148,163,184,0.5);
+      color: var(--muted);
+    }
+
     .row {
       display: flex;
       flex-wrap: wrap;
@@ -717,6 +747,7 @@
             </select>
           </div>
         </div>
+        <div id="cluster-capability" class="cap-badge" style="display:none;"></div>
       </div>
       <div class="platform-vcenter" style="display:none;">
         <h2>2. Target switch type</h2>
@@ -978,10 +1009,15 @@ network_VLAN_1003 1003"></textarea>
            Used only when every PC-routed subnet API path is blocked
            (e.g. cluster on PC DVS but its AHV is below the Atlas 11.0
            minimum). Leave blank on healthy clusters. -->
-      <details style="margin-top:10px;">
+      <details id="pe-creds-details" style="margin-top:10px;">
         <summary style="cursor:pointer; color:var(--muted);">
           PE credentials (optional) &mdash; for legacy clusters PC won't let create subnets
         </summary>
+        <div id="pe-creds-required-note" class="hint" style="display:none; margin-top:8px; color:#dc2626; font-weight:600;">
+          This cluster is on PC DVS with AHV below 11.0, so PC blocks every
+          subnet-create API. Enter Prism Element credentials to create subnets
+          via PE-direct &mdash; Create is disabled until you do.
+        </div>
         <div class="hint" style="margin-top:8px;">
           Required only when the create log shows
           <code>VLAN-basic subnet is not supported with PC DVS</code> or
@@ -1319,6 +1355,7 @@ network_VLAN_1003 1003"></textarea>
       clusters: [],
       vs: [],
       parsed: { networks: [], errors: [] },
+      capability: null,
     };
 
     const $ = (id) => document.getElementById(id);
@@ -1603,6 +1640,8 @@ network_VLAN_1003 1003"></textarea>
 
     async function loadClusters() {
       if (!state.token) return;
+      state.capability = null;
+      renderClusterCapability(null);
       const sel = $("cluster-select");
       sel.disabled = true;
       sel.innerHTML = '<option value="">-- loading --</option>';
@@ -1801,12 +1840,87 @@ network_VLAN_1003 1003"></textarea>
         updateVcCreateButton();
         return;
       }
-      const ok =
+      let ok =
         !!state.token &&
         !!$("cluster-select").value &&
         !!$("vs-select").value &&
         state.parsed.networks.length > 0;
+      // When the capability probe says this cluster can only be served
+      // via PE-direct, block Create until PE credentials are supplied.
+      if (ok && state.capability && state.capability.pe_direct_required) {
+        const peUser = ($("pe-user").value || "").trim();
+        const pePass = $("pe-pass").value || "";
+        if (!peUser || !pePass) ok = false;
+      }
       $("btn-create").disabled = !ok;
+    }
+
+    function renderClusterCapability(cap) {
+      const el = $("cluster-capability");
+      const note = $("pe-creds-required-note");
+      const details = $("pe-creds-details");
+      if (!el) return;
+      if (!cap) {
+        el.style.display = "none";
+        if (note) note.style.display = "none";
+        return;
+      }
+      el.style.display = "inline-block";
+      el.classList.remove("cap-adv", "cap-basic", "cap-pe", "cap-unknown");
+      const ver = cap.min_ahv_version || "unknown";
+      let dvs = "";
+      if (cap.on_pc_dvs === true) dvs = " - PC DVS";
+      else if (cap.on_pc_dvs === false) dvs = " - non-DVS";
+      if (cap.recommended_method === "v4-advanced") {
+        el.classList.add("cap-adv");
+        el.textContent = `AHV ${ver}${dvs} - advanced networking (v4)`;
+      } else if (cap.recommended_method === "v4-basic") {
+        el.classList.add("cap-basic");
+        el.textContent = `AHV ${ver}${dvs} - legacy basic create (v4/v3)`;
+      } else if (cap.recommended_method === "pe-direct") {
+        el.classList.add("cap-pe");
+        el.textContent = `AHV ${ver}${dvs} - PE-direct required`;
+      } else {
+        el.classList.add("cap-unknown");
+        el.textContent = `Cluster capability unknown`;
+      }
+      const peRequired = !!cap.pe_direct_required;
+      if (note) note.style.display = peRequired ? "block" : "none";
+      if (peRequired && details) details.open = true;
+    }
+
+    async function loadClusterCapability() {
+      const clusterUuid = $("cluster-select").value;
+      state.capability = null;
+      if (!state.token || !clusterUuid) {
+        renderClusterCapability(null);
+        updateCreateButton();
+        return;
+      }
+      try {
+        const cap = await postJson("/api/cluster-capability", {
+          token: state.token,
+          cluster_uuid: clusterUuid,
+        });
+        state.capability = cap;
+        renderClusterCapability(cap);
+        if (cap.recommended_method === "pe-direct") {
+          addLog("warn",
+            `Cluster capability: AHV ${cap.min_ahv_version || "?"}` +
+            ` on PC DVS (or DVS state unknown) and below the AHV 11.0 Atlas` +
+            ` minimum -- subnets must be created via PE-direct. Enter PE` +
+            ` credentials below.`);
+        } else {
+          addLog("info",
+            `Cluster capability: AHV ${cap.min_ahv_version || "?"},` +
+            ` recommended create path "${cap.recommended_method}".`);
+        }
+      } catch (e) {
+        addLog("warn", `Cluster capability probe failed: ${e.message}` +
+          ` (falling back to auto cascade on create).`);
+        renderClusterCapability(null);
+      }
+      updateCreateButton();
     }
 
     async function doCreate() {
@@ -1816,6 +1930,14 @@ network_VLAN_1003 1003"></textarea>
       const clusterUuid = $("cluster-select").value;
       const vsUuid = $("vs-select").value;
       if (!state.token || !clusterUuid || !vsUuid || state.parsed.networks.length === 0) return;
+      const peUser = ($("pe-user").value || "").trim();
+      const pePass = $("pe-pass").value || "";
+      if (state.capability && state.capability.pe_direct_required && (!peUser || !pePass)) {
+        addLog("error",
+          "This cluster requires PE-direct subnet creation. Enter PE" +
+          " credentials in the 'PE credentials' section before creating.");
+        return;
+      }
       $("btn-create").disabled = true;
       setStatus("create-status", "busy", "Creating...");
       addLog("system",
@@ -1832,11 +1954,16 @@ network_VLAN_1003 1003"></textarea>
             cluster_uuid: clusterUuid,
             vs_uuid: vsUuid,
             networks: state.parsed.networks,
-            // Optional, used only by the PE-direct fallback when every
-            // PC-routed path is blocked (PC DVS + AHV<11). Empty values
-            // are ignored server-side.
-            pe_user: ($("pe-user").value || "").trim(),
-            pe_pass: $("pe-pass").value || "",
+            // Capability verdict so the backend routes straight to the
+            // working create path instead of cascading. "auto" preserves
+            // the legacy full cascade when no verdict is available.
+            recommended_method:
+              (state.capability && state.capability.recommended_method) || "auto",
+            // Optional, used only by the PE-direct path when PC-routed
+            // create is blocked (PC DVS + AHV<11). Empty values are
+            // ignored server-side.
+            pe_user: peUser,
+            pe_pass: pePass,
           }),
         });
       } catch (e) {
@@ -3813,8 +3940,11 @@ network_VLAN_1003 1003"></textarea>
       $("cluster-select").addEventListener("change", () => {
         loadVirtualSwitches();
         loadTargetSubnets();
+        loadClusterCapability();
         updateCreateButton();
       });
+      $("pe-user").addEventListener("input", updateCreateButton);
+      $("pe-pass").addEventListener("input", updateCreateButton);
       $("btn-refresh-vs").addEventListener("click", loadVirtualSwitches);
       $("btn-refresh-target-subnets").addEventListener("click", loadTargetSubnets);
       $("vs-select").addEventListener("change", updateCreateButton);
