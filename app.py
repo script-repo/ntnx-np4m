@@ -67,7 +67,7 @@ if __name__ == "__main__" and "app" not in sys.modules:
     sys.modules["app"] = sys.modules[__name__]
 
 __version__ = "0.2.0"
-BUILD = 35   # bump on every commit
+BUILD = 36   # bump on every commit
 
 app = Flask(__name__)
 
@@ -1649,6 +1649,7 @@ def api_create():
         v3_fallback_count = 0
         pe_direct_count = 0
         saw_pc_dvs_atlas_blocker = False
+        pe_direct_blocked_by_dvs = False
         yield emit(
             "info",
             f"Starting creation of {len(networks)} subnet(s) on cluster "
@@ -1882,6 +1883,13 @@ def api_create():
                     ok, detail = yield from attempt_pe(name, vlan_i)
                     if ok:
                         pe_direct_count += 1
+                    elif _looks_like_pc_dvs_atlas_blocker(detail):
+                        # PE enforces the same PC-DVS guardrail as PC: a
+                        # "VLAN-basic subnet is not supported with PC DVS"
+                        # rejection here means there is NO API path on this
+                        # cluster until it's upgraded or removed from PC DVS.
+                        saw_pc_dvs_atlas_blocker = True
+                        pe_direct_blocked_by_dvs = True
 
             elif recommended_method == "v4-basic":
                 # AHV<11 but NOT on PC DVS: legacy basic / v3 work.
@@ -1989,6 +1997,8 @@ def api_create():
                         flag_used = "pe-direct"
                         if ok:
                             pe_direct_count += 1
+                        elif _looks_like_pc_dvs_atlas_blocker(detail):
+                            pe_direct_blocked_by_dvs = True
 
             if ok:
                 note = f" ({detail})" if detail else ""
@@ -2038,33 +2048,49 @@ def api_create():
             f"{fail} failed (of {len(networks)}).",
         )
 
-        # Actionable hint when this run hit the well-known dead zone but
-        # no PE creds were available to escape it. Surfaced once at the
-        # end of the run so the operator doesn't have to recognize the
-        # pattern themselves.
-        if saw_pc_dvs_atlas_blocker and not pe_creds_available:
-            yield emit(
-                "warn",
-                "Hint: this cluster is on PC DVS but its AHV nodes are below "
-                "the 11.0 Atlas minimum, so every PC-routed subnet API path "
-                "is blocked. Either:",
-            )
+        # Actionable hint when this run hit the well-known dead zone.
+        # Surfaced once at the end of the run so the operator doesn't have
+        # to recognize the pattern themselves.
+        if saw_pc_dvs_atlas_blocker:
+            if pe_direct_blocked_by_dvs:
+                # We tried PE-direct and PE *also* rejected it. This is the
+                # true dead end: no API surface (PC v4/v3 or PE v2) will
+                # create a VLAN-basic subnet on a PC-DVS cluster.
+                yield emit(
+                    "warn",
+                    "Hint: this cluster is on PC DVS and its AHV nodes are "
+                    "below the 11.0 Atlas minimum. Prism Element enforces the "
+                    "same restriction as Prism Central, so PE-direct cannot "
+                    "bypass it either -- there is no subnet-create API path "
+                    "on this cluster in its current state. To unblock, do one "
+                    "of the following:",
+                )
+            else:
+                yield emit(
+                    "warn",
+                    "Hint: this cluster is on PC DVS but its AHV nodes are "
+                    "below the 11.0 Atlas minimum, so every PC-routed subnet "
+                    "API path is blocked. To unblock, do one of the following:",
+                )
             yield emit(
                 "warn",
                 "  - upgrade AHV on the cluster to 11.0 or newer (PC-managed,"
-                " supported), or",
+                " supported); the v4 advanced-networking path will then work, "
+                "or",
             )
             yield emit(
                 "warn",
-                "  - un-onboard the cluster from PC DVS (legacy v4-basic / v3"
-                " paths will work again), or",
+                "  - remove the cluster from PC DVS / migrate it back to a "
+                "standard per-cluster virtual switch; the legacy v4-basic / v3"
+                " paths (and PE-direct) will work again.",
             )
-            yield emit(
-                "warn",
-                "  - paste PE credentials in the 'PE credentials' field below "
-                "the Create button and rerun -- NP4M will bypass PC and create"
-                " the subnet directly on Prism Element.",
-            )
+            if not pe_creds_available and not pe_direct_blocked_by_dvs:
+                yield emit(
+                    "warn",
+                    "  - (PE-direct was not attempted because no PE credentials"
+                    " were provided. On a PC-DVS cluster PE-direct is typically"
+                    " blocked too, so prefer one of the two fixes above.)",
+                )
 
     return Response(
         stream_with_context(gen()),

@@ -1840,18 +1840,16 @@ network_VLAN_1003 1003"></textarea>
         updateVcCreateButton();
         return;
       }
-      let ok =
+      const ok =
         !!state.token &&
         !!$("cluster-select").value &&
         !!$("vs-select").value &&
         state.parsed.networks.length > 0;
-      // When the capability probe says this cluster can only be served
-      // via PE-direct, block Create until PE credentials are supplied.
-      if (ok && state.capability && state.capability.pe_direct_required) {
-        const peUser = ($("pe-user").value || "").trim();
-        const pePass = $("pe-pass").value || "";
-        if (!peUser || !pePass) ok = false;
-      }
+      // Note: we no longer hard-block Create when the capability probe
+      // recommends PE-direct. On a PC-DVS + AHV<11 cluster PE-direct is
+      // itself blocked (PE enforces the same guardrail), so forcing PE
+      // creds would only gate a doomed attempt. The badge/note explain
+      // the situation and the run reports the honest outcome.
       $("btn-create").disabled = !ok;
     }
 
@@ -1879,13 +1877,37 @@ network_VLAN_1003 1003"></textarea>
         el.textContent = `AHV ${ver}${dvs} - legacy basic create (v4/v3)`;
       } else if (cap.recommended_method === "pe-direct") {
         el.classList.add("cap-pe");
-        el.textContent = `AHV ${ver}${dvs} - PE-direct required`;
+        if (cap.on_pc_dvs === true) {
+          el.textContent = `AHV ${ver} - PC DVS - no supported create path`;
+        } else {
+          el.textContent = `AHV ${ver}${dvs} - AHV<11, will try PE-direct`;
+        }
       } else {
         el.classList.add("cap-unknown");
         el.textContent = `Cluster capability unknown`;
       }
+      // Note text: honest about whether PE-direct can actually help.
       const peRequired = !!cap.pe_direct_required;
-      if (note) note.style.display = peRequired ? "block" : "none";
+      if (note) {
+        if (peRequired && cap.on_pc_dvs === true) {
+          note.textContent =
+            "This cluster is on PC DVS and its AHV is below 11.0. PC blocks" +
+            " every subnet-create API, and Prism Element enforces the same" +
+            " rule -- so PE-direct cannot bypass it either. The only fixes" +
+            " are to upgrade AHV to 11.0+ or remove the cluster from PC DVS." +
+            " (You may still run a create to confirm; it will report this.)";
+          note.style.display = "block";
+        } else if (peRequired) {
+          note.textContent =
+            "AHV is below 11.0 and the PC-DVS state could not be confirmed." +
+            " Enter Prism Element credentials to attempt PE-direct creation." +
+            " If the cluster is on PC DVS, PE-direct will also be blocked and" +
+            " the run will say so.";
+          note.style.display = "block";
+        } else {
+          note.style.display = "none";
+        }
+      }
       if (peRequired && details) details.open = true;
     }
 
@@ -1904,12 +1926,17 @@ network_VLAN_1003 1003"></textarea>
         });
         state.capability = cap;
         renderClusterCapability(cap);
-        if (cap.recommended_method === "pe-direct") {
+        if (cap.recommended_method === "pe-direct" && cap.on_pc_dvs === true) {
           addLog("warn",
-            `Cluster capability: AHV ${cap.min_ahv_version || "?"}` +
-            ` on PC DVS (or DVS state unknown) and below the AHV 11.0 Atlas` +
-            ` minimum -- subnets must be created via PE-direct. Enter PE` +
-            ` credentials below.`);
+            `Cluster capability: AHV ${cap.min_ahv_version || "?"} on PC DVS` +
+            ` and below the AHV 11.0 Atlas minimum. No subnet-create API path` +
+            ` works on this cluster (PE-direct is blocked too). Upgrade AHV to` +
+            ` 11.0+ or remove the cluster from PC DVS.`);
+        } else if (cap.recommended_method === "pe-direct") {
+          addLog("warn",
+            `Cluster capability: AHV ${cap.min_ahv_version || "?"} below the` +
+            ` AHV 11.0 minimum, PC-DVS state unknown -- will attempt PE-direct.` +
+            ` Enter PE credentials below to enable it.`);
         } else {
           addLog("info",
             `Cluster capability: AHV ${cap.min_ahv_version || "?"},` +
@@ -1932,11 +1959,22 @@ network_VLAN_1003 1003"></textarea>
       if (!state.token || !clusterUuid || !vsUuid || state.parsed.networks.length === 0) return;
       const peUser = ($("pe-user").value || "").trim();
       const pePass = $("pe-pass").value || "";
-      if (state.capability && state.capability.pe_direct_required && (!peUser || !pePass)) {
-        addLog("error",
-          "This cluster requires PE-direct subnet creation. Enter PE" +
-          " credentials in the 'PE credentials' section before creating.");
-        return;
+      // On a confirmed PC-DVS + AHV<11 cluster there is no working API
+      // path (PE-direct is blocked too). Warn but let the run proceed so
+      // the log spells out the remediation. When the DVS state is unknown
+      // and no PE creds were entered, nudge the user toward PE-direct.
+      const cap = state.capability;
+      if (cap && cap.recommended_method === "pe-direct" && (!peUser || !pePass)) {
+        if (cap.on_pc_dvs === true) {
+          addLog("warn",
+            "This cluster is on PC DVS with AHV<11; no subnet-create API path" +
+            " works (PE-direct included). Running anyway to confirm -- see the" +
+            " remediation hint at the end.");
+        } else {
+          addLog("warn",
+            "AHV<11 with unknown PC-DVS state and no PE credentials entered." +
+            " PE-direct won't be attempted; PC-routed paths will be tried.");
+        }
       }
       $("btn-create").disabled = true;
       setStatus("create-status", "busy", "Creating...");
