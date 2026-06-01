@@ -67,7 +67,7 @@ if __name__ == "__main__" and "app" not in sys.modules:
     sys.modules["app"] = sys.modules[__name__]
 
 __version__ = "0.2.0"
-BUILD = 36   # bump on every commit
+BUILD = 37   # bump on every commit
 
 app = Flask(__name__)
 
@@ -1627,6 +1627,11 @@ def api_create():
     recommended_method = (body.get("recommended_method") or "auto").strip().lower()
     if recommended_method not in ("auto", "v4-advanced", "v4-basic", "pe-direct"):
         recommended_method = "auto"
+    # When true, allow creating a subnet on a VLAN that already has one
+    # (as long as the *name* is unique). Off by default because two
+    # subnets sharing a VLAN id break clean Atlas adoption on a later
+    # AHV 11+ upgrade; the cluster/PE may also reject the duplicate.
+    allow_duplicate_vlans = bool(body.get("allow_duplicate_vlans"))
     if not cluster_uuid:
         return jsonify(error="cluster_uuid is required"), 400
     if not isinstance(networks, list) or not networks:
@@ -1644,6 +1649,7 @@ def api_create():
     def gen():
         success = 0
         fail = 0
+        skipped = 0
         fallback_count = 0
         pc_dvs_retry_count = 0
         v3_fallback_count = 0
@@ -1667,6 +1673,14 @@ def api_create():
             f"Cluster currently has {len(existing_names)} subnet(s) "
             f"{'(first 100 only -- pagination not implemented)' if truncated else ''}".rstrip(),
         )
+        if allow_duplicate_vlans:
+            yield emit(
+                "warn",
+                "Duplicate-VLAN override is ON: subnets may be created on a "
+                "VLAN that already has one. Note this can block clean Atlas "
+                "adoption after an AHV 11+ upgrade, and the cluster/PE may "
+                "still reject a duplicate VLAN on basic networking.",
+            )
 
         def attempt(net_name: str, net_vlan: int, adv: bool,
                     omit_cluster_ref: bool = False):
@@ -1833,24 +1847,26 @@ def api_create():
                 continue
             if name.lower() in existing_names:
                 yield emit(
-                    "error",
+                    "warn",
                     f"Skipping '{name}': a subnet with that name already "
                     f"exists on this cluster.",
                 )
-                fail += 1
+                skipped += 1
                 continue
-            if vlan_i in existing_vlans:
+            if vlan_i in existing_vlans and not allow_duplicate_vlans:
                 # Clean-adoption safeguard: refuse to create a second
                 # subnet on a VLAN that already has one. A duplicate VLAN
                 # is what breaks Atlas auto-adoption when this cluster is
                 # later upgraded to AHV 11+ (two networks share a VLAN id).
+                # Disabled when the operator opts into duplicate VLANs.
                 yield emit(
-                    "error",
+                    "warn",
                     f"Skipping '{name}': VLAN {vlan_i} already has a subnet "
                     f"on this cluster (creating a duplicate would block "
-                    f"clean Atlas adoption after an AHV 11+ upgrade).",
+                    f"clean Atlas adoption after an AHV 11+ upgrade). "
+                    f"Enable 'Allow multiple subnets per VLAN' to override.",
                 )
-                fail += 1
+                skipped += 1
                 continue
 
             # ---- Route to the method the capability probe recommends ----
@@ -2042,9 +2058,10 @@ def api_create():
                 f"{pe_direct_count} via PE-direct fallback"
             )
         summary_extra = f" ({', '.join(notes)})" if notes else ""
+        skipped_extra = f", {skipped} skipped (already exist)" if skipped else ""
         yield emit(
             "info",
-            f"Done. {success} succeeded{summary_extra}, "
+            f"Done. {success} created{summary_extra}{skipped_extra}, "
             f"{fail} failed (of {len(networks)}).",
         )
 

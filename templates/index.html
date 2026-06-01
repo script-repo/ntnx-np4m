@@ -1005,6 +1005,16 @@ network_VLAN_1003 1003"></textarea>
         <span class="status" id="create-status"><span class="dot"></span><span class="text">Idle</span></span>
       </div>
 
+      <label class="checkbox" style="display:flex; align-items:flex-start; gap:8px; margin-top:10px;">
+        <input type="checkbox" id="allow-duplicate-vlans" style="margin-top:3px;" />
+        <span class="hint" style="margin:0;">
+          Allow multiple subnets per VLAN (only the <em>name</em> must be
+          unique). Off by default: two subnets sharing a VLAN id can block
+          clean Atlas adoption after an AHV&nbsp;11+ upgrade, and the
+          cluster may reject the duplicate on basic networking.
+        </span>
+      </label>
+
       <!-- Optional Prism Element credentials for the PE-direct fallback.
            Used only when every PC-routed subnet API path is blocked
            (e.g. cluster on PC DVS but its AHV is below the Atlas 11.0
@@ -1997,6 +2007,9 @@ network_VLAN_1003 1003"></textarea>
             // the legacy full cascade when no verdict is available.
             recommended_method:
               (state.capability && state.capability.recommended_method) || "auto",
+            // Opt-in: permit creating a subnet on a VLAN that already has
+            // one (name must still be unique).
+            allow_duplicate_vlans: $("allow-duplicate-vlans").checked,
             // Optional, used only by the PE-direct path when PC-routed
             // create is blocked (PC DVS + AHV<11). Empty values are
             // ignored server-side.
