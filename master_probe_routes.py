@@ -542,24 +542,67 @@ def _find_subnet_extid_for_vlan(
     base_url: str,
     cluster_uuid: str,
     vlan: int,
-) -> str | None:
-    """Find the (first) subnet on `cluster_uuid` whose `networkId == vlan`."""
+    name: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Resolve the target subnet's extId on `cluster_uuid`.
+
+    Targets by (name, VLAN) so that duplicate-VLAN subnets are
+    disambiguated by the name the operator created -- the NIC swap moves
+    by subnet UUID, and a bare VLAN lookup can't tell two subnets on the
+    same VLAN apart. Returns ``(extId, note)`` where ``note`` carries a
+    human-readable reason on refusal or a warning on ambiguity.
+
+    Refuse-and-skip: when a name is given but no subnet on that VLAN has
+    that exact name (case-insensitive), returns ``(None, reason)`` rather
+    than guessing -- pointing the probe at the wrong subnet would silently
+    test the wrong network.
+    """
     try:
         r = session.get(
             f"{base_url}/api/networking/v4.0/config/subnets?$limit=100",
             timeout=20,
         )
         if r.status_code >= 400:
-            return None
+            return None, f"subnet list returned HTTP {r.status_code}"
         data = (r.json() or {}).get("data") or []
-        for s in data:
-            if s.get("clusterReference") != cluster_uuid:
-                continue
-            if s.get("networkId") == vlan:
-                return s.get("extId")
-        return None
-    except requests.RequestException:
-        return None
+    except requests.RequestException as exc:
+        return None, f"subnet list request failed: {exc}"
+
+    vlan_matches = [
+        s for s in data
+        if s.get("clusterReference") == cluster_uuid
+        and s.get("networkId") == vlan
+    ]
+    if not vlan_matches:
+        return None, None
+
+    if name:
+        want = name.strip().lower()
+        named = [
+            s for s in vlan_matches
+            if (s.get("name") or "").strip().lower() == want
+        ]
+        if len(named) == 1:
+            return named[0].get("extId"), None
+        if len(named) > 1:
+            return named[0].get("extId"), (
+                f"{len(named)} subnets named '{name}' on VLAN {vlan}; "
+                f"using the first ({named[0].get('extId')})"
+            )
+        # Name given but no exact match on this VLAN -> refuse and skip.
+        others = ", ".join(repr(s.get("name")) for s in vlan_matches)
+        return None, (
+            f"no subnet named '{name}' on VLAN {vlan} "
+            f"(VLAN {vlan} subnets present: {others})"
+        )
+
+    # No name supplied: fall back to VLAN-only resolution.
+    if len(vlan_matches) == 1:
+        return vlan_matches[0].get("extId"), None
+    return vlan_matches[0].get("extId"), (
+        f"{len(vlan_matches)} subnets on VLAN {vlan} and no name given; "
+        f"using the first ({vlan_matches[0].get('extId')})"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -793,15 +836,21 @@ def api_probe_tests_run() -> Any:
                 continue
 
             yield emit("info", f"VLAN {vlan} ({name}): finding target subnet on cluster...")
-            subnet_ext = _find_subnet_extid_for_vlan(pc_session, base_url, cluster_uuid, vlan)
+            subnet_ext, sel_note = _find_subnet_extid_for_vlan(
+                pc_session, base_url, cluster_uuid, vlan,
+                name=(net or {}).get("name") or None,
+            )
             if not subnet_ext:
-                yield emit("error", f"  no subnet on this cluster matches VLAN {vlan}; skipping")
-                row["detail"] = f"no subnet matches VLAN {vlan}"
+                reason = sel_note or f"no subnet on this cluster matches VLAN {vlan}"
+                yield emit("error", f"  {reason}; skipping")
+                row["detail"] = reason
                 yield emit_result(**row)
                 fail_count += 1
                 continue
+            if sel_note:
+                yield emit("warn", f"  subnet selection: {sel_note}")
             row["subnet_ext_id"] = subnet_ext
-            yield emit("info", f"  subnet extId: {subnet_ext}")
+            yield emit("info", f"  subnet extId: {subnet_ext} (name '{name}', VLAN {vlan})")
 
             yield emit("info", f"  pointing probe NIC {probe['test_nic_ext_id']} at this subnet...")
             try:
