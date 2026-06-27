@@ -824,6 +824,203 @@ def _find_subnet_extid_for_vlan(
 
 
 # ---------------------------------------------------------------------------
+# Cluster host listing + per-host VM migration
+#
+# Lets the operator drive the probe VM onto each AHV host in turn so the
+# same VLAN suite is exercised from every host individually (catches a
+# single host with a miswired uplink / missing VLAN trunk that a cluster-
+# wide pass would mask).
+#
+#   GET  /api/clustermgmt/v4.0/config/clusters/{cluster}/hosts   -> host list
+#   POST /api/vmm/v4.0/ahv/config/vms/{vm}/$actions/migrate-to-host
+#        If-Match: <VM ETag>   body: { host: { extId } }          -> task ref
+# ---------------------------------------------------------------------------
+
+
+def _host_display_name(h: dict[str, Any]) -> str:
+    """Best-effort human label for a v4 clustermgmt host object. Field
+    names drift across PC builds, so probe a few likely spots and fall
+    back to the extId."""
+    for k in ("hostName", "name"):
+        v = h.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return h.get("extId") or "(unnamed host)"
+
+
+def _host_ip(h: dict[str, Any]) -> str | None:
+    """Best-effort hypervisor/CVM IP for display, tolerating the several
+    shapes PC v4 has used for the address field."""
+    for container_key in ("hypervisor", "controllerVm"):
+        c = h.get(container_key)
+        if isinstance(c, dict):
+            for k in ("ipAddress", "ip", "externalAddress"):
+                v = c.get(k)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+                if isinstance(v, dict):
+                    ipv4 = v.get("ipv4") or v.get("value")
+                    if isinstance(ipv4, dict):
+                        ipv4 = ipv4.get("value")
+                    if isinstance(ipv4, str) and ipv4.strip():
+                        return ipv4.strip()
+    return None
+
+
+def _pc_list_cluster_hosts(
+    session: requests.Session, base_url: str, cluster_uuid: str,
+) -> list[dict[str, Any]]:
+    """Return [{extId, name, ip}] for the AHV hosts of ``cluster_uuid``."""
+    r = session.get(
+        f"{base_url}/api/clustermgmt/v4.0/config/clusters/"
+        f"{cluster_uuid}/hosts?$limit=100",
+        timeout=30,
+    )
+    if r.status_code >= 400:
+        raise RuntimeError(
+            f"GET cluster hosts failed HTTP {r.status_code}: {r.text[:200]}"
+        )
+    try:
+        data = (r.json() or {}).get("data") or []
+    except ValueError:
+        data = []
+    out: list[dict[str, Any]] = []
+    for h in data:
+        if not isinstance(h, dict):
+            continue
+        out.append({
+            "extId": h.get("extId"),
+            "name": _host_display_name(h),
+            "ip": _host_ip(h),
+        })
+    return out
+
+
+def _pc_get_vm_host_ext_id(
+    session: requests.Session, base_url: str, vm_ext_id: str,
+) -> str | None:
+    """Return the extId of the AHV host the VM is currently running on,
+    or None if PC doesn't report one (e.g. the VM is powered off)."""
+    body, _etag = _pc_get_vm(session, base_url, vm_ext_id)
+    data = body.get("data") or {}
+    for key in ("host", "hostReference", "currentHost"):
+        host = data.get(key)
+        if isinstance(host, dict) and host.get("extId"):
+            return host.get("extId")
+    return None
+
+
+def _pc_migrate_vm_to_host(
+    session: requests.Session,
+    base_url: str,
+    vm_ext_id: str,
+    host_ext_id: str,
+) -> None:
+    """Live-migrate ``vm_ext_id`` onto ``host_ext_id`` and wait for the
+    task. Like NIC create this mutates the VM, so PC v4 requires
+    ``If-Match`` set to the *VM* ETag (else 428). Raises on failure."""
+    _vm, vm_etag = _pc_get_vm(session, base_url, vm_ext_id)
+    headers: dict[str, str] = {"NTNX-Request-Id": str(uuid.uuid4())}
+    if vm_etag:
+        headers["If-Match"] = vm_etag
+    r = session.post(
+        f"{base_url}/api/vmm/v4.0/ahv/config/vms/{vm_ext_id}/$actions/migrate-to-host",
+        json={"host": {"extId": host_ext_id}},
+        headers=headers,
+        timeout=120,
+    )
+    if r.status_code not in (200, 201, 202):
+        try:
+            err = r.json()
+        except ValueError:
+            err = {"raw": r.text}
+        raise RuntimeError(
+            f"migrate-to-host failed HTTP {r.status_code}: {_app._format_api_error(err)}"
+        )
+    try:
+        payload = r.json() or {}
+    except ValueError:
+        payload = {}
+    task_id = _app._extract_task_ext_id(payload)
+    if task_id:
+        # Migration can take a while on a busy host; give it room.
+        task = _app._wait_for_task(session, base_url, task_id, timeout_seconds=300)
+        if task.get("status") != "SUCCEEDED":
+            raise RuntimeError(
+                f"VM migrate task ended {task.get('status')}: "
+                f"{_app._format_api_error({'data': task})}"
+            )
+
+
+@master_probe_bp.post("/api/probes/host-list")
+def api_probes_host_list() -> Any:
+    """List the cluster's AHV hosts for the migrate dropdown, and report
+    which host the probe VM is currently on so the UI can highlight it."""
+    body = request.get_json(force=True, silent=True) or {}
+    target_token = body.get("target_token")
+    cluster_uuid = (body.get("cluster_uuid") or "").strip()
+    probe_id = (body.get("probe_id") or "").strip()
+    if not cluster_uuid:
+        return jsonify(error="cluster_uuid is required"), 400
+    sess = _app._get_session(target_token)
+    if not sess:
+        return jsonify(error="not connected to target PC"), 401
+    s = _app._make_pc_session(sess["auth"])
+    try:
+        hosts = _pc_list_cluster_hosts(s, sess["base_url"], cluster_uuid)
+    except RuntimeError as exc:
+        return jsonify(error=str(exc)), 502
+    except requests.RequestException as exc:
+        return jsonify(error=f"request failed: {exc}"), 502
+
+    current_host_ext_id = None
+    if probe_id:
+        with _probes_lock:
+            probe = dict(PROBES.get(probe_id) or {})
+        vm_uuid = probe.get("probe_vm_uuid")
+        if vm_uuid:
+            try:
+                current_host_ext_id = _pc_get_vm_host_ext_id(s, sess["base_url"], vm_uuid)
+            except (RuntimeError, requests.RequestException):
+                current_host_ext_id = None
+    hosts.sort(key=lambda h: (h.get("name") or "").lower())
+    return jsonify(hosts=hosts, current_host_ext_id=current_host_ext_id)
+
+
+@master_probe_bp.post("/api/probes/migrate")
+def api_probes_migrate() -> Any:
+    """Live-migrate the probe VM onto the chosen host."""
+    body = request.get_json(force=True, silent=True) or {}
+    target_token = body.get("target_token")
+    probe_id = (body.get("probe_id") or "").strip()
+    host_ext_id = (body.get("host_ext_id") or "").strip()
+    if not host_ext_id:
+        return jsonify(error="host_ext_id is required"), 400
+    with _probes_lock:
+        probe = dict(PROBES.get(probe_id) or {})
+    if not probe:
+        return jsonify(error="probe not found"), 404
+    vm_uuid = probe.get("probe_vm_uuid")
+    if not vm_uuid:
+        return jsonify(error="probe is missing probe_vm_uuid; set it first"), 400
+    sess = _app._get_session(target_token)
+    if not sess:
+        return jsonify(error="not connected to target PC"), 401
+    s = _app._make_pc_session(sess["auth"])
+    try:
+        _pc_migrate_vm_to_host(s, sess["base_url"], vm_uuid, host_ext_id)
+    except (RuntimeError, requests.RequestException) as exc:
+        return jsonify(error=str(exc)), 502
+    # Re-read the live host so the UI can confirm where the VM landed.
+    landed = None
+    try:
+        landed = _pc_get_vm_host_ext_id(s, sess["base_url"], vm_uuid)
+    except (RuntimeError, requests.RequestException):
+        landed = host_ext_id
+    return jsonify(ok=True, host_ext_id=landed or host_ext_id)
+
+
+# ---------------------------------------------------------------------------
 # Endpoints for probe-VM NIC introspection (used by the UI to populate the
 # "which vNIC is the test NIC" picker after register)
 # ---------------------------------------------------------------------------
@@ -1000,6 +1197,27 @@ def api_probe_tests_run() -> Any:
             yield emit("error", "No probe test iface known (set NP4M_TEST_IFACE on the probe or pass test_iface in the request body).")
             return
 
+        # Resolve which AHV host the probe VM is currently on, so every
+        # result row records the host under test. Done once per run: the
+        # "Probe test ALL HOSTS" flow migrates between runs, not within
+        # one, so the host is stable for the duration of this stream.
+        probe_host_ext_id = None
+        probe_host_name = None
+        try:
+            probe_host_ext_id = _pc_get_vm_host_ext_id(
+                pc_session, base_url, probe["probe_vm_uuid"]
+            )
+            if probe_host_ext_id:
+                for h in _pc_list_cluster_hosts(pc_session, base_url, cluster_uuid):
+                    if h.get("extId") == probe_host_ext_id:
+                        probe_host_name = h.get("name")
+                        break
+        except (RuntimeError, requests.RequestException):
+            pass
+        probe_host_label = probe_host_name or probe_host_ext_id or ""
+        if probe_host_label:
+            yield emit("info", f"Probe VM currently on host: {probe_host_label}")
+
         for net in networks:
             name = (net or {}).get("name") or "(unnamed)"
             # Seed the result row up front so every terminal branch
@@ -1011,6 +1229,8 @@ def api_probe_tests_run() -> Any:
                 "vlan": None,
                 "subnet_ext_id": None,
                 "test_nic_ext_id": probe.get("test_nic_ext_id"),
+                "probe_host": probe_host_label,
+                "probe_host_ext_id": probe_host_ext_id or "",
                 "test_iface": effective_test_iface,
                 "guest_ip": None,
                 "prefix": None,

@@ -317,6 +317,19 @@
     button.secondary:hover:not(:disabled) {
       background: #f3f4f6;
     }
+    button.green {
+      background: #16a34a;
+      color: #fff;
+    }
+    button.green:hover:not(:disabled) { background: #15803d; }
+    /* "Switch to probe" sits on the dark header; force a readable
+       black-on-white-text chip with no hover color change. */
+    #btn-to-probe.secondary,
+    #btn-to-probe.secondary:hover:not(:disabled) {
+      background: #000;
+      color: #fff;
+      border-color: #000;
+    }
 
     .status {
       font-size: 12px;
@@ -1308,6 +1321,12 @@ network_VLAN_1003 1003"></textarea>
 
       <div class="actions">
         <button id="btn-probe-run" disabled>Run probe tests</button>
+        <select id="probe-host-select" disabled
+                title="Pick a host to migrate the probe VM onto before running. Defaults to the host the probe is already on.">
+          <option value="">-- hosts load with a probe + cluster --</option>
+        </select>
+        <button id="btn-probe-run-all-hosts" class="green" disabled
+                title="Run the test suite on the current host, then live-migrate the probe to each remaining host and repeat, so every host is exercised. The exported report covers all hosts.">Probe test ALL HOSTS</button>
         <span class="status" id="probe-run-status"><span class="dot"></span><span class="text">Idle</span></span>
       </div>
     </section>
@@ -1464,19 +1483,20 @@ network_VLAN_1003 1003"></textarea>
         addLog("warn", "No probe-test results to export yet. Run probe tests first.");
         return;
       }
-      // Columns map 1:1 onto the user-requested fields:
-      //  1) subnet configured           -> "subnet"   (name [VLAN])
-      //  2) test NIC configured         -> "test_nic" (probe vNIC extId)
-      //  3) guest IP                    -> "test_ip"
-      //  4) prefix                      -> "prefix"
-      //  5) gateway IP                  -> "gateway_ip"
-      //  6) gateway ping pass/fail      -> "gateway_ping"
-      //  7) external IP                 -> "external_ip"
-      //  8) external ping pass/fail     -> "external_ping"
+      // Columns map onto the user-requested fields:
+      //  1) host probe ran on           -> "host"     (AHV host name/IP)
+      //  2) subnet configured           -> "subnet"   (name [VLAN])
+      //  3) test NIC configured         -> "test_nic" (probe vNIC extId)
+      //  4) guest IP                    -> "test_ip"
+      //  5) prefix                      -> "prefix"
+      //  6) gateway IP                  -> "gateway_ip"
+      //  7) gateway ping pass/fail      -> "gateway_ping"
+      //  8) external IP                 -> "external_ip"
+      //  9) external ping pass/fail     -> "external_ping"
       // Trailing columns (status/detail/subnet_ext_id/test_iface/run_ts)
       // are non-required extras that make the CSV self-describing.
       const header = csvRow([
-        "subnet", "test_nic", "test_ip", "prefix",
+        "host", "subnet", "test_nic", "test_ip", "prefix",
         "gateway_ip", "gateway_ping",
         "external_ip", "external_ping",
         "status", "detail",
@@ -1491,6 +1511,7 @@ network_VLAN_1003 1003"></textarea>
           ? new Date(r.run_ts * 1000).toISOString()
           : "";
         lines.push(csvRow([
+          r.probe_host || "",
           subnet,
           r.test_nic_ext_id || "",
           r.guest_ip || "",
@@ -2969,6 +2990,9 @@ network_VLAN_1003 1003"></textarea>
       tokenVisible: false,
       logTimer: null,
       activeTab: "subnets",
+      hosts: [],                 // [{ extId, name, ip }] for the selected cluster
+      currentHostExtId: null,    // host the probe VM is on (highlighted in the dropdown)
+      running: false,            // a single- or all-hosts run is in flight
     };
     let _rowSeq = 1;
     function _newRow(seed) {
@@ -3120,6 +3144,7 @@ network_VLAN_1003 1003"></textarea>
       refreshProbeConfig();
       if (probeState.activeTab === "probe-control") scheduleProbeLogPoll();
       updateRunProbesButton();
+      loadProbeHosts();
     }
 
     async function registerProbe() {
@@ -3623,7 +3648,8 @@ network_VLAN_1003 1003"></textarea>
         && !!probe.probe_vm_uuid
         && !!probe.test_nic_ext_id
         && validRowsForRun().length > 0;
-      $("btn-probe-run").disabled = !ok;
+      $("btn-probe-run").disabled = probeState.running || !ok;
+      updateAllHostsButton();
     }
 
     // -----------------------------------------------------------------
@@ -3888,23 +3914,38 @@ network_VLAN_1003 1003"></textarea>
       }
     }
 
-    async function runProbeTests() {
-      const probe = probeState.probes.find((p) => p.id === probeState.selectedId);
-      const clusterUuid = $("cluster-select").value;
-      const networks = validRowsForRun();
-      if (!probe || !clusterUuid || !state.token) return;
-      if (networks.length === 0) return;
-      $("btn-probe-run").disabled = true;
-      setStatus("probe-run-status", "busy", "Running...");
-      addLog("system",
-        `Probe-test run: ${networks.length} VLAN(s) via probe '${probe.name}'.`);
-      // Reset the report buffer at the start of each run so Export
-      // report only ever produces rows from the latest run.
-      reportState.rows = [];
-      reportState.startedAt = new Date();
-      reportState.probeName = probe.name;
-      reportState.probeHost = probe.mgmt_host;
-      updateExportReportEnabled();
+    // Disable/enable the run controls as a group while a run is in flight,
+    // so the operator can't kick off a second run (or a migration) on top
+    // of one already streaming.
+    function setProbeRunning(on) {
+      probeState.running = !!on;
+      if (on) {
+        $("btn-probe-run").disabled = true;
+        $("btn-probe-run-all-hosts").disabled = true;
+        $("probe-host-select").disabled = true;
+      } else {
+        $("probe-host-select").disabled = probeState.hosts.length === 0;
+        updateRunProbesButton();
+      }
+    }
+
+    async function migrateProbeToHost(probe, hostExtId, hostName) {
+      const label = hostName || hostExtId;
+      addLog("system", `Migrating probe '${probe.name}' to host ${label}...`);
+      setStatus("probe-run-status", "busy", `Migrating to ${label}...`);
+      const res = await postJson("/api/probes/migrate", {
+        probe_id: probe.id,
+        target_token: state.token,
+        host_ext_id: hostExtId,
+      });
+      probeState.currentHostExtId = res.host_ext_id || hostExtId;
+      addLog("ok", `Probe now on host ${label}.`);
+    }
+
+    // Stream one run of the suite against the probe wherever it currently
+    // sits. Appends per-VLAN rows to reportState (the caller decides when
+    // to reset it). Returns {okCount, failCount, errored}.
+    async function streamProbeRun(probe, clusterUuid, networks) {
       let resp;
       try {
         resp = await fetch("/api/probe-tests/run", {
@@ -3920,9 +3961,7 @@ network_VLAN_1003 1003"></textarea>
         });
       } catch (e) {
         addLog("error", `Probe run request failed: ${e.message}`);
-        setStatus("probe-run-status", "err", "Failed");
-        $("btn-probe-run").disabled = false;
-        return;
+        return { okCount: 0, failCount: 0, errored: true };
       }
       if (!resp.ok) {
         let errMsg = "HTTP " + resp.status;
@@ -3931,9 +3970,7 @@ network_VLAN_1003 1003"></textarea>
           if (j && j.error) errMsg = j.error;
         } catch (_) {}
         addLog("error", `Server rejected probe run: ${errMsg}`);
-        setStatus("probe-run-status", "err", "Failed");
-        $("btn-probe-run").disabled = false;
-        return;
+        return { okCount: 0, failCount: 0, errored: true };
       }
       const reader = resp.body.getReader();
       const decoder = new TextDecoder();
@@ -3967,13 +4004,187 @@ network_VLAN_1003 1003"></textarea>
           else if (evt.level === "error") failCount++;
         }
       }
+      return { okCount, failCount, errored: false };
+    }
+
+    function resetReportForRun(probe) {
+      reportState.rows = [];
+      reportState.startedAt = new Date();
+      reportState.probeName = probe.name;
+      reportState.probeHost = probe.mgmt_host;
+      updateExportReportEnabled();
+    }
+
+    async function runProbeTests() {
+      if (probeState.running) return;
+      const probe = probeState.probes.find((p) => p.id === probeState.selectedId);
+      const clusterUuid = $("cluster-select").value;
+      const networks = validRowsForRun();
+      if (!probe || !clusterUuid || !state.token) return;
+      if (networks.length === 0) return;
+
+      setProbeRunning(true);
+      // Reset the report buffer at the start of each run so Export
+      // report only ever produces rows from the latest run.
+      resetReportForRun(probe);
+
+      // If the operator picked a host other than the one the probe is on,
+      // migrate there first so the run exercises that host.
+      const targetHost = $("probe-host-select").value;
+      if (targetHost && targetHost !== probeState.currentHostExtId) {
+        const h = probeState.hosts.find((x) => x.extId === targetHost);
+        try {
+          await migrateProbeToHost(probe, targetHost, h && h.name);
+        } catch (e) {
+          addLog("error", `Migration failed: ${e.message}`);
+          setStatus("probe-run-status", "err", "Migration failed");
+          setProbeRunning(false);
+          return;
+        }
+      }
+
+      setStatus("probe-run-status", "busy", "Running...");
+      addLog("system",
+        `Probe-test run: ${networks.length} VLAN(s) via probe '${probe.name}'.`);
+      const { okCount, failCount } = await streamProbeRun(probe, clusterUuid, networks);
       if (failCount > 0) {
         setStatus("probe-run-status", "err", `Done with ${failCount} error(s)`);
       } else {
         setStatus("probe-run-status", "ok", `Done (${okCount} pass)`);
       }
-      updateRunProbesButton();
+      setProbeRunning(false);
       await loadProbes();
+      await loadProbeHosts();
+    }
+
+    async function runAllHosts() {
+      if (probeState.running) return;
+      const probe = probeState.probes.find((p) => p.id === probeState.selectedId);
+      const clusterUuid = $("cluster-select").value;
+      const networks = validRowsForRun();
+      if (!probe || !clusterUuid || !state.token || networks.length === 0) return;
+
+      setProbeRunning(true);
+      // Refresh the host list (and the probe's current host) so the loop
+      // is built from live data, not whatever was cached when the dropdown
+      // was last populated.
+      await loadProbeHosts();
+      const hosts = probeState.hosts.slice();
+      if (hosts.length === 0) {
+        addLog("error", "No hosts found on this cluster; cannot run all-hosts test.");
+        setStatus("probe-run-status", "err", "No hosts");
+        setProbeRunning(false);
+        return;
+      }
+
+      // Test the host the probe is already on first (no needless migration),
+      // then the rest in listed order.
+      hosts.sort((a, b) => {
+        const ac = a.extId === probeState.currentHostExtId ? 0 : 1;
+        const bc = b.extId === probeState.currentHostExtId ? 0 : 1;
+        return ac - bc;
+      });
+
+      // One report covering every host, so Export gives the operator the
+      // full matrix in a single CSV.
+      resetReportForRun(probe);
+      addLog("system",
+        `Probe test ALL HOSTS: ${hosts.length} host(s) x ${networks.length} VLAN(s) via '${probe.name}'.`);
+
+      let totalOk = 0;
+      let totalFail = 0;
+      for (let i = 0; i < hosts.length; i++) {
+        const h = hosts[i];
+        const label = h.name || h.extId;
+        if (h.extId !== probeState.currentHostExtId) {
+          try {
+            await migrateProbeToHost(probe, h.extId, h.name);
+          } catch (e) {
+            addLog("error", `Migration to ${label} failed: ${e.message}; skipping this host.`);
+            totalFail++;
+            continue;
+          }
+        }
+        setStatus("probe-run-status", "busy",
+          `Host ${i + 1}/${hosts.length}: ${label}...`);
+        addLog("system", `--- Host ${i + 1}/${hosts.length}: ${label} ---`);
+        const { okCount, failCount } = await streamProbeRun(probe, clusterUuid, networks);
+        totalOk += okCount;
+        totalFail += failCount;
+      }
+
+      if (totalFail > 0) {
+        setStatus("probe-run-status", "err", `All hosts done, ${totalFail} error(s)`);
+      } else {
+        setStatus("probe-run-status", "ok", `All hosts done (${totalOk} pass)`);
+      }
+      addLog("system",
+        `Probe test ALL HOSTS complete: ${hosts.length} host(s), ${totalOk} pass, ${totalFail} error(s).`);
+      setProbeRunning(false);
+      await loadProbes();
+      await loadProbeHosts();
+    }
+
+    // Populate the host dropdown for the selected probe + cluster and mark
+    // the host the probe is currently on. Safe to call when prerequisites
+    // are missing (it just clears/disables the controls).
+    async function loadProbeHosts() {
+      const sel = $("probe-host-select");
+      const probe = probeState.probes.find((p) => p.id === probeState.selectedId);
+      const clusterUuid = $("cluster-select").value;
+      if (!sel) return;
+      if (!probe || !clusterUuid || !state.token) {
+        probeState.hosts = [];
+        probeState.currentHostExtId = null;
+        sel.innerHTML = '<option value="">-- hosts load with a probe + cluster --</option>';
+        sel.disabled = true;
+        updateAllHostsButton();
+        return;
+      }
+      try {
+        const res = await postJson("/api/probes/host-list", {
+          target_token: state.token,
+          cluster_uuid: clusterUuid,
+          probe_id: probe.id,
+        });
+        probeState.hosts = res.hosts || [];
+        probeState.currentHostExtId = res.current_host_ext_id || null;
+        sel.innerHTML = "";
+        if (probeState.hosts.length === 0) {
+          sel.innerHTML = '<option value="">(no hosts found)</option>';
+          sel.disabled = true;
+        } else {
+          probeState.hosts.forEach((h) => {
+            const opt = document.createElement("option");
+            opt.value = h.extId;
+            const isCurrent = h.extId === probeState.currentHostExtId;
+            const ip = h.ip ? ` ${h.ip}` : "";
+            opt.textContent = `${h.name}${ip}${isCurrent ? "  ● current" : ""}`;
+            if (isCurrent) opt.selected = true;
+            sel.appendChild(opt);
+          });
+          sel.disabled = probeState.running;
+        }
+      } catch (e) {
+        probeState.hosts = [];
+        sel.innerHTML = '<option value="">(host list failed)</option>';
+        sel.disabled = true;
+        addLog("warn", `Could not load cluster hosts: ${e.message}`);
+      }
+      updateAllHostsButton();
+    }
+
+    function updateAllHostsButton() {
+      const probe = probeState.probes.find((p) => p.id === probeState.selectedId);
+      const ok = !probeState.running
+        && !!state.token
+        && !!$("cluster-select").value
+        && !!probe
+        && !!probe.probe_vm_uuid
+        && !!probe.test_nic_ext_id
+        && validRowsForRun().length > 0
+        && probeState.hosts.length > 0;
+      $("btn-probe-run-all-hosts").disabled = !ok;
     }
 
     document.addEventListener("DOMContentLoaded", () => {
@@ -4099,6 +4310,7 @@ network_VLAN_1003 1003"></textarea>
       $("btn-probe-fetch-nics").addEventListener("click", fetchProbeNics);
       $("btn-probe-save-nic").addEventListener("click", saveProbeNicSelection);
       $("btn-probe-run").addEventListener("click", runProbeTests);
+      $("btn-probe-run-all-hosts").addEventListener("click", runAllHosts);
       $("probe-vm-uuid").addEventListener("input", updateProbeFetchNicsEnabled);
       $("btn-probe-vm-load").addEventListener("click", loadProbeVms);
       $("probe-vm-select").addEventListener("change", (ev) => {
@@ -4111,6 +4323,7 @@ network_VLAN_1003 1003"></textarea>
       $("cluster-select").addEventListener("change", () => {
         updateRunProbesButton();
         updateProbeAgentPanel();
+        loadProbeHosts();
       });
 
       // Tab strip
