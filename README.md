@@ -219,18 +219,27 @@ What it does (idempotent):
 3. Ensures `git` and `openssl` are present, installing them via the same
    package manager if missing.
 4. Creates a system user `np4m` (via `useradd`, falling back to BusyBox
-   `adduser` on Alpine) and clones the repo to `/home/np4m/ntnx-np4m`.
+   `adduser` on Alpine) and clones the repo to `/home/np4m/ntnx-np4m`. Also
+   drops a validated `/etc/sudoers.d/np4m` granting that user passwordless
+   sudo (the probe agent shells out to `nmcli`/`ip`, which need root); skip
+   with `NP4M_SUDOERS=no`.
 5. Builds a virtualenv with the detected Python and installs
    `requirements.txt` plus `gunicorn`.
 6. **If `NP4M_BIND != 127.0.0.1`** (the default), generates a self-signed TLS
    cert at `<install-dir>/tls/np4m.{crt,key}` with the host's FQDN and
    primary IP in the SAN, then opens the port in `firewalld` or `ufw` if
    either is active.
-7. If `systemd` is present, writes `/etc/systemd/system/np4m.service` and
+7. On an **enforcing SELinux** system (RHEL/Rocky/Alma/Fedora), relabels the
+   install dir to `bin_t` (persistently via `semanage` + `restorecon`, or
+   `chcon` as a fallback). Without this, files cloned under `/home` keep the
+   `user_home_t` label that systemd cannot execute, and the service dies at
+   start with `status=203/EXEC` "Permission denied" on `gunicorn`. Skip with
+   `NP4M_SELINUX=no`.
+8. If `systemd` is present, writes `/etc/systemd/system/np4m.service` and
    runs `systemctl enable --now np4m`. If not (e.g. Alpine + OpenRC), prints
    the manual `gunicorn` start line so you can wire it into your own init
    system.
-8. Prints the URL, the `journalctl -u np4m -f` hint, and the result of a
+9. Prints the URL, the `journalctl -u np4m -f` hint, and the result of a
    `curl` to `/api/version` so you can confirm the app is live.
 
 | Env var          | Default                                          | Purpose                                                |
@@ -246,6 +255,8 @@ What it does (idempotent):
 | `NP4M_PY`        | auto-detect highest 3.10+                        | Force a specific interpreter binary (full path or name on PATH). |
 | `NP4M_OPEN_FW`   | `yes`                                            | Set to `no` to skip the firewalld / ufw step.          |
 | `NP4M_SYSTEMD`   | `yes`                                            | Set to `no` to skip writing the systemd unit.          |
+| `NP4M_SELINUX`   | `yes`                                            | On enforcing SELinux, relabel the install dir `bin_t` (via `semanage`/`restorecon`) so systemd can exec the venv under `/home`. Set to `no` to skip. |
+| `NP4M_SUDOERS`   | `yes`                                            | Drop a validated `/etc/sudoers.d/np4m` granting the service user passwordless sudo (probe agent needs `nmcli`/`ip`). Set to `no` to skip. |
 
 > The self-signed cert will trip a browser warning on first visit. To use a
 > trusted cert, copy it onto the box and re-run the installer with

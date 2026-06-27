@@ -118,6 +118,7 @@ def _redacted_probe(p: dict[str, Any]) -> dict[str, Any]:
         "use_https": p.get("use_https"),
         "probe_vm_uuid": p.get("probe_vm_uuid"),
         "test_nic_ext_id": p.get("test_nic_ext_id"),
+        "test_nic_mac": p.get("test_nic_mac"),
         "created_at": p.get("created_at"),
         "stored_token_fp": _tok_fp(p.get("token") or ""),
     }
@@ -174,6 +175,7 @@ def api_probes_register() -> Any:
     token = (body.get("token") or "").strip()
     probe_vm_uuid = (body.get("probe_vm_uuid") or "").strip() or None
     test_nic_ext_id = (body.get("test_nic_ext_id") or "").strip() or None
+    test_nic_mac = (body.get("test_nic_mac") or "").strip() or None
     use_https = bool(body.get("use_https", False))
 
     if not mgmt_host:
@@ -193,6 +195,7 @@ def api_probes_register() -> Any:
         "token": token,
         "probe_vm_uuid": probe_vm_uuid,
         "test_nic_ext_id": test_nic_ext_id,
+        "test_nic_mac": test_nic_mac,
         "created_at": time.time(),
     }
     with _probes_lock:
@@ -211,12 +214,17 @@ def api_probes_update() -> Any:
         p = PROBES.get(probe_id)
         if not p:
             return jsonify(error="probe not found"), 404
-        for field in ("name", "probe_vm_uuid", "test_nic_ext_id", "token"):
+        for field in ("name", "probe_vm_uuid", "test_nic_ext_id", "test_nic_mac", "token"):
             if field in body and body[field] is not None:
                 val = body[field]
                 if isinstance(val, str):
                     val = val.strip()
                 p[field] = val or None
+        # If the operator re-picks the test NIC without supplying a MAC,
+        # drop any previously-captured MAC so the by-MAC self-heal can't
+        # relocate back to the old NIC; it'll be re-captured on next run.
+        if "test_nic_ext_id" in body and "test_nic_mac" not in body:
+            p["test_nic_mac"] = None
         snapshot = dict(p)
         _save_probes_unlocked()
     return jsonify(probe=_redacted_probe(snapshot))
@@ -479,35 +487,111 @@ _NIC_READONLY_FIELDS: frozenset[str] = frozenset({
 })
 
 
-def _pc_swap_nic_subnet(
+def _nic_subnet_ext_id(nic: dict[str, Any]) -> str | None:
+    """Pull the bound subnet extId out of a NIC body (v4 ``networkInfo``)."""
+    return ((nic.get("networkInfo") or {}).get("subnet") or {}).get("extId")
+
+
+def _nic_mac(nic: dict[str, Any]) -> str | None:
+    """MAC from either the public ``backingInfo`` or the older
+    ``nicBackingInfo`` projection PC 7.3 also returns."""
+    return (
+        (nic.get("backingInfo") or {}).get("macAddress")
+        or (nic.get("nicBackingInfo") or {}).get("macAddress")
+    )
+
+
+def _pc_find_nic_extid_by_mac(
+    session: requests.Session,
+    base_url: str,
+    vm_ext_id: str,
+    mac: str,
+) -> str | None:
+    """Return the extId of the VM's NIC whose MAC matches ``mac`` (case-
+    insensitive), or None. Used to relocate the test NIC after a recreate
+    swapped its extId out from under a stale registry entry."""
+    if not mac:
+        return None
+    for n in _pc_list_vm_nics(session, base_url, vm_ext_id):
+        if (n.get("mac") or "").lower() == mac.lower():
+            return n.get("extId")
+    return None
+
+
+def _pc_delete_nic(
     session: requests.Session,
     base_url: str,
     vm_ext_id: str,
     nic_ext_id: str,
-    subnet_ext_id: str,
-) -> dict[str, Any]:
-    """Re-point an existing NIC at a new subnet.
-
-    PC v4 treats PUT /vms/{vmExtId}/nics/{nicExtId} as a full-object
-    replacement, so we have to round-trip the *complete* NIC body (incl.
-    MAC, vlanMode, trunk list, IP config) and only mutate the subnet
-    reference. Anything else gets reset to defaults server-side — most
-    visibly, the MAC becomes EMPTY and the task fails with "VM NIC MAC
-    address: EMPTY".
-    """
-    nic, etag = _pc_get_nic(session, base_url, vm_ext_id, nic_ext_id)
-    body: dict[str, Any] = {
-        k: v for k, v in nic.items() if k not in _NIC_READONLY_FIELDS
-    }
-    network_info = dict(body.get("networkInfo") or {})
-    network_info["subnet"] = {"extId": subnet_ext_id}
-    body["networkInfo"] = network_info
-
+) -> None:
+    """Delete a NIC and wait for the task. Raises on failure."""
+    _nic, etag = _pc_get_nic(session, base_url, vm_ext_id, nic_ext_id)
     headers: dict[str, str] = {"NTNX-Request-Id": str(uuid.uuid4())}
     if etag:
         headers["If-Match"] = etag
-    r = session.put(
+    r = session.delete(
         f"{base_url}/api/vmm/v4.0/ahv/config/vms/{vm_ext_id}/nics/{nic_ext_id}",
+        headers=headers,
+        timeout=60,
+    )
+    if r.status_code not in (200, 201, 202):
+        try:
+            err = r.json()
+        except ValueError:
+            err = {"raw": r.text}
+        raise RuntimeError(
+            f"DELETE nic failed HTTP {r.status_code}: {_app._format_api_error(err)}"
+        )
+    try:
+        payload = r.json() or {}
+    except ValueError:
+        payload = {}
+    task_id = _app._extract_task_ext_id(payload)
+    if task_id:
+        task = _app._wait_for_task(session, base_url, task_id, timeout_seconds=120)
+        if task.get("status") != "SUCCEEDED":
+            raise RuntimeError(
+                f"NIC delete task ended {task.get('status')}: "
+                f"{_app._format_api_error({'data': task})}"
+            )
+
+
+def _pc_create_nic(
+    session: requests.Session,
+    base_url: str,
+    vm_ext_id: str,
+    *,
+    mac: str,
+    subnet_ext_id: str,
+    vlan_mode: str = "ACCESS",
+    nic_type: str = "NORMAL_NIC",
+    is_connected: bool = True,
+    trunked_vlans: list[int] | None = None,
+) -> str | None:
+    """Create a NIC on ``vm_ext_id`` bound to ``subnet_ext_id``, preserving
+    ``mac``. Returns the new NIC extId (located by MAC after the task).
+
+    Creating a NIC mutates the VM, so PC v4 requires ``If-Match`` set to the
+    *VM* ETag (not a NIC ETag) — without it PC answers 428 Precondition
+    Required.
+    """
+    _vm, vm_etag = _pc_get_vm(session, base_url, vm_ext_id)
+    network_info: dict[str, Any] = {
+        "nicType": nic_type,
+        "vlanMode": vlan_mode,
+        "subnet": {"extId": subnet_ext_id},
+    }
+    if vlan_mode == "TRUNKED" and trunked_vlans:
+        network_info["trunkedVlans"] = trunked_vlans
+    body: dict[str, Any] = {
+        "backingInfo": {"isConnected": is_connected, "macAddress": mac},
+        "networkInfo": network_info,
+    }
+    headers: dict[str, str] = {"NTNX-Request-Id": str(uuid.uuid4())}
+    if vm_etag:
+        headers["If-Match"] = vm_etag
+    r = session.post(
+        f"{base_url}/api/vmm/v4.0/ahv/config/vms/{vm_ext_id}/nics",
         json=body,
         headers=headers,
         timeout=60,
@@ -518,23 +602,157 @@ def _pc_swap_nic_subnet(
         except ValueError:
             err = {"raw": r.text}
         raise RuntimeError(
-            f"PUT nic failed HTTP {r.status_code}: "
-            f"{_app._format_api_error(err)}"
+            f"POST nic failed HTTP {r.status_code}: {_app._format_api_error(err)}"
         )
     try:
         payload = r.json() or {}
     except ValueError:
         payload = {}
     task_id = _app._extract_task_ext_id(payload)
-    if not task_id:
-        return {"status": "SUCCEEDED", "note": "no task id returned"}
-    task = _app._wait_for_task(session, base_url, task_id, timeout_seconds=120)
-    if task.get("status") != "SUCCEEDED":
+    if task_id:
+        task = _app._wait_for_task(session, base_url, task_id, timeout_seconds=120)
+        if task.get("status") != "SUCCEEDED":
+            raise RuntimeError(
+                f"NIC create task ended {task.get('status')}: "
+                f"{_app._format_api_error({'data': task})}"
+            )
+    # Locate the freshly-created NIC by MAC (its extId is brand new and not
+    # returned in the task body). Retry briefly; the VM read can lag the task.
+    for _ in range(5):
+        for n in _pc_list_vm_nics(session, base_url, vm_ext_id):
+            if (n.get("mac") or "").lower() == mac.lower():
+                return n.get("extId")
+        time.sleep(1.0)
+    return None
+
+
+def _pc_swap_nic_subnet(
+    session: requests.Session,
+    base_url: str,
+    vm_ext_id: str,
+    nic_ext_id: str,
+    subnet_ext_id: str,
+    *,
+    mac: str | None = None,
+) -> dict[str, Any]:
+    """Re-point a NIC at ``subnet_ext_id``, transparently handling the
+    AHV-version difference.
+
+    On PC 7.5+ / AHV 11+, ``PUT /vms/{vm}/nics/{nic}`` with a changed
+    ``networkInfo.subnet`` updates the NIC in place. On PC 7.3 / AHV 10.3
+    the NIC's network is **non-updatable**: the PUT (changing only the
+    public ``networkInfo``) is accepted and the task reports SUCCEEDED, but
+    the subnet never actually changes (the authoritative ``nicNetworkInfo``
+    is left untouched, and forcing it fails the task with VMM-30110). So we
+    PUT, *verify* the subnet actually moved, and if it didn't, fall back to
+    delete + recreate the NIC on the target subnet (preserving the MAC).
+
+    Because the recreate path changes the NIC extId, a stored extId can go
+    stale (e.g. an interrupted run, or recreate done out of band). When a
+    ``mac`` is supplied we self-heal: if the extId no longer resolves, we
+    relocate the NIC by MAC.
+
+    Returns ``{"status", "nic_ext_id", "mac", "method", "note"}``.
+    ``nic_ext_id`` is the NIC's *current* extId — which changes when the
+    recreate path is taken, so the caller must re-track it (and ``mac``,
+    captured here on first contact, lets future runs self-heal).
+    """
+    nic = etag = None
+    if nic_ext_id:
+        try:
+            nic, etag = _pc_get_nic(session, base_url, vm_ext_id, nic_ext_id)
+        except RuntimeError:
+            nic = None  # stale extId — fall through to MAC relocation
+    if nic is None:
+        relocated = _pc_find_nic_extid_by_mac(session, base_url, vm_ext_id, mac or "")
+        if not relocated:
+            raise RuntimeError(
+                f"test NIC {nic_ext_id!r} not found on VM {vm_ext_id} and it "
+                f"could not be relocated by MAC ({mac or 'none on record'})"
+            )
+        nic_ext_id = relocated
+        nic, etag = _pc_get_nic(session, base_url, vm_ext_id, nic_ext_id)
+
+    live_mac = _nic_mac(nic) or mac
+    if _nic_subnet_ext_id(nic) == subnet_ext_id:
+        return {
+            "status": "SUCCEEDED", "nic_ext_id": nic_ext_id, "mac": live_mac,
+            "method": "noop", "note": "already on target subnet",
+        }
+
+    ni = nic.get("networkInfo") or {}
+    vlan_mode = ni.get("vlanMode") or "ACCESS"
+    nic_type = ni.get("nicType") or "NORMAL_NIC"
+    trunked = ni.get("trunkedVlans") or []
+    is_connected = (nic.get("backingInfo") or {}).get("isConnected", True)
+
+    # --- 1) In-place update (PC 7.5+ / AHV 11+) ---------------------------
+    body: dict[str, Any] = {
+        k: v for k, v in nic.items() if k not in _NIC_READONLY_FIELDS
+    }
+    network_info = dict(body.get("networkInfo") or {})
+    network_info["subnet"] = {"extId": subnet_ext_id}
+    body["networkInfo"] = network_info
+    headers: dict[str, str] = {"NTNX-Request-Id": str(uuid.uuid4())}
+    if etag:
+        headers["If-Match"] = etag
+    r = session.put(
+        f"{base_url}/api/vmm/v4.0/ahv/config/vms/{vm_ext_id}/nics/{nic_ext_id}",
+        json=body,
+        headers=headers,
+        timeout=60,
+    )
+    inplace_applied = False
+    if r.status_code in (200, 201, 202):
+        try:
+            payload = r.json() or {}
+        except ValueError:
+            payload = {}
+        task_id = _app._extract_task_ext_id(payload)
+        if task_id:
+            # The task can report SUCCEEDED on 7.3 even though nothing
+            # changed, so its status alone is not trustworthy here.
+            _app._wait_for_task(session, base_url, task_id, timeout_seconds=120)
+        try:
+            after, _ = _pc_get_nic(session, base_url, vm_ext_id, nic_ext_id)
+            inplace_applied = _nic_subnet_ext_id(after) == subnet_ext_id
+        except RuntimeError:
+            inplace_applied = False
+
+    if inplace_applied:
+        return {
+            "status": "SUCCEEDED", "nic_ext_id": nic_ext_id, "mac": live_mac,
+            "method": "in_place", "note": "",
+        }
+
+    # --- 2) Fallback: delete + recreate (PC 7.3 / AHV 10.3) ---------------
+    if not live_mac:
         raise RuntimeError(
-            f"NIC swap task ended {task.get('status')}: "
-            f"{_app._format_api_error({'data': task})}"
+            "NIC subnet is not updatable in place on this AHV version and "
+            "the existing MAC could not be read, so the NIC cannot be "
+            "recreated on the target subnet"
         )
-    return task
+    _pc_delete_nic(session, base_url, vm_ext_id, nic_ext_id)
+    new_id = _pc_create_nic(
+        session, base_url, vm_ext_id,
+        mac=live_mac, subnet_ext_id=subnet_ext_id,
+        vlan_mode=vlan_mode, nic_type=nic_type,
+        is_connected=is_connected,
+        trunked_vlans=trunked,
+    )
+    if not new_id:
+        raise RuntimeError(
+            "NIC was recreated on the target subnet but could not be located "
+            f"by MAC {live_mac} afterward"
+        )
+    return {
+        "status": "SUCCEEDED", "nic_ext_id": new_id, "mac": live_mac,
+        "method": "recreate",
+        "note": (
+            "AHV subnet not updatable in place (PC 7.3 / AHV 10.3); "
+            "recreated NIC on the target subnet — extId changed"
+        ),
+    }
 
 
 def _find_subnet_extid_for_vlan(
@@ -854,9 +1072,10 @@ def api_probe_tests_run() -> Any:
 
             yield emit("info", f"  pointing probe NIC {probe['test_nic_ext_id']} at this subnet...")
             try:
-                _pc_swap_nic_subnet(
+                swap = _pc_swap_nic_subnet(
                     pc_session, base_url,
                     probe["probe_vm_uuid"], probe["test_nic_ext_id"], subnet_ext,
+                    mac=probe.get("test_nic_mac"),
                 )
             except (RuntimeError, requests.RequestException) as exc:
                 yield emit("error", f"  PC NIC swap failed: {exc}")
@@ -864,6 +1083,35 @@ def api_probe_tests_run() -> Any:
                 yield emit_result(**row)
                 fail_count += 1
                 continue
+
+            # The recreate fallback (PC 7.3 / AHV 10.3) deletes + recreates
+            # the NIC, so its extId changes. Re-track the extId — and the MAC
+            # captured on first contact — on the in-memory probe and persist
+            # to the registry so the next VLAN, and the next run, target the
+            # live NIC (and can self-heal a stale extId by MAC).
+            new_nic = swap.get("nic_ext_id")
+            new_mac = swap.get("mac")
+            nic_changed = bool(new_nic and new_nic != probe.get("test_nic_ext_id"))
+            mac_changed = bool(new_mac and new_mac != probe.get("test_nic_mac"))
+            if nic_changed or mac_changed:
+                old_nic = probe.get("test_nic_ext_id")
+                if new_nic:
+                    probe["test_nic_ext_id"] = new_nic
+                    row["test_nic_ext_id"] = new_nic
+                if new_mac:
+                    probe["test_nic_mac"] = new_mac
+                with _probes_lock:
+                    rec = PROBES.get(probe_id)
+                    if rec is not None:
+                        rec["test_nic_ext_id"] = probe.get("test_nic_ext_id")
+                        rec["test_nic_mac"] = probe.get("test_nic_mac")
+                        _save_probes_unlocked()
+                if nic_changed:
+                    yield emit(
+                        "warn",
+                        f"  {swap.get('note') or 'NIC recreated'}: "
+                        f"test NIC extId {old_nic} -> {new_nic}",
+                    )
 
             # Give the guest a moment to notice the link bounce on the
             # AHV side before we shove a new IP at it; some kernels race

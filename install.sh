@@ -29,6 +29,8 @@
 #   NP4M_TLS_KEY    Path to TLS key.     Default: self-signed at <dir>/tls/np4m.key
 #   NP4M_OPEN_FW    Open firewall port.  Default: yes (firewalld or ufw)
 #   NP4M_SYSTEMD    Install systemd unit. Default: yes (auto-skipped if no systemd)
+#   NP4M_SELINUX    Relabel install dir bin_t on enforcing SELinux. Default: yes
+#   NP4M_SUDOERS    Passwordless sudo for the service user. Default: yes
 
 set -euo pipefail
 
@@ -267,6 +269,28 @@ fi
 # Make sure $NP4M_HOME exists (adduser -D doesn't always create it).
 [[ -d "$NP4M_HOME" ]] || { mkdir -p "$NP4M_HOME" && chown "$NP4M_USER:" "$NP4M_HOME"; }
 
+# --- 6b. Passwordless sudo for the service user ----------------------------
+# The probe agent shells out to nmcli / ip (CAP_NET_ADMIN) and may need other
+# privileged commands while running as the unprivileged ${NP4M_USER}; grant
+# passwordless sudo via a validated /etc/sudoers.d drop-in. Written through a
+# temp file + visudo -cf so a malformed entry can never break sudo on the box.
+NP4M_SUDOERS="${NP4M_SUDOERS:-yes}"
+if [[ "$NP4M_SUDOERS" == "yes" ]]; then
+  if command -v sudo >/dev/null 2>&1 && [[ -d /etc/sudoers.d ]]; then
+    log "Granting passwordless sudo to ${NP4M_USER} (/etc/sudoers.d/np4m)..."
+    _np4m_sudoers_tmp="$(mktemp)"
+    printf '%s ALL=(ALL)  NOPASSWD: ALL\n' "$NP4M_USER" > "$_np4m_sudoers_tmp"
+    if ! command -v visudo >/dev/null 2>&1 || visudo -cf "$_np4m_sudoers_tmp" >/dev/null 2>&1; then
+      install -m 0440 -o root -g root "$_np4m_sudoers_tmp" /etc/sudoers.d/np4m
+    else
+      warn "Generated sudoers entry failed visudo validation; skipping."
+    fi
+    rm -f "$_np4m_sudoers_tmp"
+  else
+    warn "sudo / /etc/sudoers.d not available; skipping passwordless sudo setup."
+  fi
+fi
+
 # --- 7. Clone / update repo ------------------------------------------------
 if [[ -d "$NP4M_DIR/.git" ]]; then
   log "Repo already present at ${NP4M_DIR}, pulling latest..."
@@ -330,6 +354,50 @@ open_firewall() {
 }
 if [[ "$NP4M_OPEN_FW" == "yes" && "$NP4M_TLS" == "yes" ]]; then
   open_firewall "$NP4M_PORT"
+fi
+
+# --- 10b. SELinux: make the install dir executable by systemd --------------
+# On SELinux-enforcing distros (RHEL/Rocky/Alma/Fedora), files cloned under
+# /home are labeled user_home_t, which systemd (PID 1) is NOT allowed to
+# execute. The service then dies at start with status=203/EXEC "Permission
+# denied" on .venv/bin/gunicorn. Relabel the whole install tree to bin_t so
+# the interpreter, gunicorn, and the venv's shared objects can be exec'd by
+# the service — same label a normal /usr install would carry. Persist the
+# rule with semanage (survives a full relabel); fall back to chcon if
+# semanage isn't available.
+NP4M_SELINUX="${NP4M_SELINUX:-yes}"
+relabel_selinux() {
+  command -v getenforce >/dev/null 2>&1 || return 0
+  [[ "$(getenforce 2>/dev/null)" == "Enforcing" ]] || return 0
+
+  log "SELinux is enforcing; labeling ${NP4M_DIR} as bin_t so systemd can exec it..."
+
+  if ! command -v semanage >/dev/null 2>&1; then
+    case "$FAMILY" in
+      rhel) pkg_install_try policycoreutils-python-utils || true ;;
+      suse) pkg_install_try policycoreutils-python-utils || true ;;
+      debian) pkg_install_try policycoreutils-python-utils || true ;;
+    esac
+  fi
+
+  if command -v semanage >/dev/null 2>&1; then
+    # Add (or replace) a persistent file-context rule, then apply it.
+    semanage fcontext -a -t bin_t "${NP4M_DIR}(/.*)?" 2>/dev/null \
+      || semanage fcontext -m -t bin_t "${NP4M_DIR}(/.*)?" 2>/dev/null \
+      || true
+    if command -v restorecon >/dev/null 2>&1; then
+      restorecon -RF "$NP4M_DIR" >/dev/null 2>&1 || true
+    fi
+  elif command -v chcon >/dev/null 2>&1; then
+    warn "semanage not available; using chcon (not persisted across a full relabel)."
+    chcon -R -t bin_t "$NP4M_DIR" >/dev/null 2>&1 || true
+  else
+    warn "SELinux is enforcing but neither semanage nor chcon is available;"
+    warn "the service may fail with status=203/EXEC. Install policycoreutils."
+  fi
+}
+if [[ "$NP4M_SELINUX" == "yes" ]]; then
+  relabel_selinux
 fi
 
 # --- 11. systemd unit (or manual-start fallback) --------------------------
